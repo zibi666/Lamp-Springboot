@@ -283,7 +283,7 @@ public class WebSocketServer extends AbstractWebSocketHandler {
     @Override
     public void afterConnectionClosed(@NotNull WebSocketSession session, @NotNull CloseStatus status) {
         String id = session.getId();
-        log.info("ESP32 Disconnected: {}", id);
+        log.info("ESP32 Disconnected: id={}, closeCode={}, reason={}", id, status.getCode(), status.getReason());
 
         activeSessions.remove(id);
 
@@ -299,6 +299,8 @@ public class WebSocketServer extends AbstractWebSocketHandler {
 
     @Override
     public void handleTransportError(@NotNull WebSocketSession session, @NotNull Throwable exception) {
+        String id = session.getId();
+        log.error("ESP32 Transport error: id={}, message={}", id, exception.getMessage(), exception);
         afterConnectionClosed(session, CloseStatus.SERVER_ERROR);
     }
 
