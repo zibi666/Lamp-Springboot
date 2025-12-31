@@ -15,13 +15,14 @@ public class LightController {
     private WebSocketServer webSocketServer;
 
     @PostMapping("/brightness")
-    public String controlBrightness(@RequestParam("command") Integer command) {
+    public String controlBrightness(@RequestParam("command") Integer command, 
+                                    @RequestParam(value = "value", required = false, defaultValue = "10") Integer value) {
         String message = "";
         if (command == 1) {
             // 根据推测，1 应该是调亮，虽然用户描述写了两个 down，但为了逻辑完备性，这里处理为 up
-            message = "(brightness_up,10)";
+            message = "(brightness_up," + value + ")";
         } else if (command == 2) {
-            message = "(brightness_down,10)";
+            message = "(brightness_down," + value + ")";
         } else {
             return "Unknown brightness command";
         }
@@ -31,12 +32,13 @@ public class LightController {
     }
 
     @PostMapping("/temperature")
-    public String controlTemperature(@RequestParam("command") Integer command) {
+    public String controlTemperature(@RequestParam("command") Integer command,
+                                     @RequestParam(value = "value", required = false, defaultValue = "10") Integer value) {
         String message = "";
         if (command == 3) {
-            message = "(tem_up,10)";
+            message = "(tem_up," + value + ")";
         } else if (command == 4) {
-            message = "(tem_down,10)";
+            message = "(tem_down," + value + ")";
         } else {
             return "Unknown temperature command";
         }
