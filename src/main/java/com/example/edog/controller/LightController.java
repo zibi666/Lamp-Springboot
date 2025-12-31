@@ -33,7 +33,7 @@ public class LightController {
 
     @PostMapping("/temperature")
     public String controlTemperature(@RequestParam("command") Integer command,
-                                    @RequestParam(value = "value", required = false, defaultValue = "10") Integer value) {
+                                     @RequestParam(value = "value", required = false, defaultValue = "10") Integer value) {
         String message = "";
         if (command == 3) {
             message = "(tem_up," + value + ")";
