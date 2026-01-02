@@ -17,6 +17,7 @@ import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -97,7 +98,9 @@ public class AliyunTTSService {
      */
     public void synthesizeStream(String text, Consumer<byte[]> opusConsumer, Runnable onComplete) {
         String token = tokenService.getToken();
-        initClient(token);
+        NlsClient localClient = new NlsClient(token);
+        FlowingSpeechSynthesizer synthesizer = null;
+        CountDownLatch finished = new CountDownLatch(1);
 
         try {
             // 初始化 Opus 编码器 (24kHz, Mono, VOIP)
@@ -131,6 +134,7 @@ public class AliyunTTSService {
                     if (onComplete != null) {
                         onComplete.run();
                     }
+                    finished.countDown();
                 }
 
                 @Override
@@ -139,6 +143,7 @@ public class AliyunTTSService {
                     if (onComplete != null) {
                         onComplete.run();
                     }
+                    finished.countDown();
                 }
 
                 @Override
@@ -180,11 +185,11 @@ public class AliyunTTSService {
                 }
             };
 
-            FlowingSpeechSynthesizer synthesizer = new FlowingSpeechSynthesizer(client, listener);
+            synthesizer = new FlowingSpeechSynthesizer(localClient, listener);
             synthesizer.setAppKey(credentials.getAppKey());
             synthesizer.setFormat(OutputFormatEnum.PCM);
             synthesizer.setSampleRate(SampleRateEnum.SAMPLE_RATE_24K);
-            synthesizer.setVoice("siyue"); // 默认发音人
+            synthesizer.setVoice("zhixiaoxia"); // 默认发音人
             synthesizer.setVolume(50);
             synthesizer.setSpeechRate(0);
             synthesizer.setPitchRate(0);
@@ -225,11 +230,24 @@ public class AliyunTTSService {
             synthesizer.start();
             synthesizer.send(text);
             synthesizer.stop(); // 标记文本发送结束，等待音频流完成
+            finished.await(60, TimeUnit.SECONDS);
 
         } catch (Exception e) {
             log.error("TTS Synthesis Error", e);
             if (onComplete != null) {
                 onComplete.run();
+            }
+            finished.countDown();
+        } finally {
+            if (synthesizer != null) {
+                try {
+                    synthesizer.stop();
+                } catch (Exception ignored) {
+                }
+            }
+            try {
+                localClient.shutdown();
+            } catch (Exception ignored) {
             }
         }
     }

@@ -19,7 +19,6 @@ public class LightController {
                                     @RequestParam(value = "value", required = false, defaultValue = "10") Integer value) {
         String message = "";
         if (command == 1) {
-            // 根据推测，1 应该是调亮，虽然用户描述写了两个 down，但为了逻辑完备性，这里处理为 up
             message = "(brightness_up," + value + ")";
         } else if (command == 2) {
             message = "(brightness_down," + value + ")";
@@ -45,5 +44,10 @@ public class LightController {
 
         webSocketServer.broadcastControlMessage(message);
         return "Sent: " + message;
+    }
+
+    @PostMapping("/getlt")
+    public String getLt() {
+        return webSocketServer.getLatestLt();
     }
 }

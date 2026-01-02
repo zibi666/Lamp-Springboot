@@ -11,6 +11,9 @@ import io.github.jaredmdobson.concentus.OpusException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 /**
@@ -27,7 +30,10 @@ public class AliyunRealtimeASR {
     private SpeechTranscriber transcriber;
     private OpusDecoder opusDecoder;
     private Consumer<String> textCallback;
+
+    // 这个标志位现在是核心判断依据，只要它为 true，就说明 start() 中的 CountDownLatch 已经通过，ASR 绝对就绪
     private volatile boolean isRunning = false;
+
     private final short[] pcmBuffer = new short[5760];
     private final String appKey;
 
@@ -44,46 +50,51 @@ public class AliyunRealtimeASR {
         this.textCallback = callback;
     }
 
-    /**
-     * Start ASR with the latest valid token.
-     */
-    public void start(String token) {
-        if (appKey == null || appKey.isEmpty()) {
-            log.error("ASR 启动失败：AppKey 为空，请检查 aliyun.appKey 配置");
-            throw new IllegalArgumentException("AppKey is null or empty");
-        }
-        if (token == null || token.isEmpty()) {
-            log.error("ASR 启动失败：传入的 Token 为空，请检查 AccessKey/Token 服务");
-            throw new IllegalArgumentException("Token is null or empty");
-        }
-
-        // 1. Initialize or refresh shared NlsClient when token changes.
+    public static void shutdownSharedClient() {
         synchronized (clientLock) {
-            if (nlsClient == null || !token.equals(currentClientToken)) {
-                log.info("检测到 Token 变更或 Client 未初始化，正在重置 NlsClient...");
-
-                if (nlsClient != null) {
-                    try {
-                        nlsClient.shutdown();
-                    } catch (Exception e) {
-                        log.warn("关闭旧 NlsClient 失败", e);
-                    }
-                }
-
+            if (nlsClient != null) {
                 try {
-                    nlsClient = new NlsClient(token);
-                    currentClientToken = token;
-                    log.info("NlsClient 初始化/刷新成功");
+                    nlsClient.shutdown();
                 } catch (Exception e) {
-                    log.error("NlsClient 创建失败", e);
-                    throw e;
+                    log.warn("关闭旧 NlsClient 失败", e);
+                } finally {
+                    nlsClient = null;
+                    currentClientToken = "";
                 }
             }
         }
+    }
+
+    /**
+     * Start ASR with the latest valid token.
+     * 此方法会阻塞直到 ASR 握手完成，或者超时
+     */
+    public void start(String token) {
+        if (appKey == null || appKey.isEmpty()) {
+            log.error("ASR 启动失败：AppKey 为空");
+            throw new IllegalArgumentException("AppKey is null or empty");
+        }
+        if (token == null || token.isEmpty()) {
+            log.error("ASR 启动失败：Token 为空");
+            throw new IllegalArgumentException("Token is null or empty");
+        }
 
         try {
-            // 2. Create transcriber with current client.
-            transcriber = new SpeechTranscriber(nlsClient, getListener());
+            // 核心修复 1：定义同步锁，等待回调确认
+            CountDownLatch readyLatch = new CountDownLatch(1);
+            AtomicReference<String> startError = new AtomicReference<>();
+
+            synchronized (clientLock) {
+                if (nlsClient == null || !token.equals(currentClientToken)) {
+                    log.info("检测到 Token 变更或 Client 未初始化，正在重置 NlsClient...");
+                    shutdownSharedClient(); // 使用封装好的方法安全关闭
+                    nlsClient = new NlsClient(token);
+                    currentClientToken = token;
+                    log.info("NlsClient 初始化/刷新成功");
+                }
+            }
+
+            transcriber = new SpeechTranscriber(nlsClient, getListener(readyLatch, startError));
             transcriber.setAppKey(appKey);
             transcriber.setFormat(InputFormatEnum.PCM);
             transcriber.setSampleRate(SampleRateEnum.SAMPLE_RATE_16K);
@@ -92,19 +103,45 @@ public class AliyunRealtimeASR {
             transcriber.setEnableIntermediateResult(false);
 
             transcriber.start();
+
+            // 核心修复 2：阻塞等待，确保连接真正建立
+            boolean ready = readyLatch.await(5, TimeUnit.SECONDS);
+            if (!ready) {
+                stop();
+                throw new RuntimeException("ASR 启动超时 (5s)");
+            }
+            if (startError.get() != null && !startError.get().isEmpty()) {
+                stop();
+                throw new RuntimeException("ASR 启动回调报错: " + startError.get());
+            }
+
+            // 只有到了这里，isRunning 才置为 true，此时 sendOpusStream 才可以工作
             isRunning = true;
-            log.info("ASR 会话启动成功");
+            log.info("ASR 会话启动成功 (Ready to receive audio)");
 
         } catch (Exception e) {
             log.error("ASR 启动异常", e);
             isRunning = false;
+            stop();
+            // 如果是频繁请求错误，主动休眠退避，防止死循环
+            if (shouldBackoff(e)) {
+                sleepBackoff();
+            }
             throw new RuntimeException("ASR 启动异常", e);
         }
     }
 
     public void sendOpusStream(byte[] opusBytes) {
+        // 核心修复 3：移除 isClientOpen 反射检查，完全信任 isRunning
         if (!isRunning || transcriber == null) return;
         if (opusBytes == null || opusBytes.length == 0) return;
+
+        // 可选：如果 nlsClient 丢了，也没必要发
+        if (nlsClient == null) {
+            log.warn("NlsClient is null, skipping frame");
+            return;
+        }
+
         try {
             int samples = opusDecoder.decode(opusBytes, 0, opusBytes.length, pcmBuffer, 0, pcmBuffer.length, false);
             if (samples > 0) {
@@ -117,31 +154,81 @@ public class AliyunRealtimeASR {
                 transcriber.send(pcmData);
             }
         } catch (Exception e) {
-            log.warn("音频发送失败 {}，尝试重置 Opus 解码器", e.getMessage());
-            resetDecoder();
+            // 这里只打印 warn，不要抛出异常导致 WebSocket 断开
+            // 也不要打印堆栈，防止刷屏
+            log.warn("ASR 发送数据异常: {}", e.getMessage());
         }
     }
 
     public void stop() {
         isRunning = false;
-        if (transcriber != null) {
+        SpeechTranscriber localTranscriber = this.transcriber;
+        this.transcriber = null;
+
+        if (localTranscriber != null) {
             try {
-                transcriber.stop();
+                // 先发送stop指令，告知服务端停止识别
+                localTranscriber.stop();
+                // 等待服务端确认，确保并发槽位被释放
+                Thread.sleep(100);
             } catch (Exception e) {
-                log.debug("忽略 transcriber.stop 异常", e);
-            } finally {
-                transcriber.close();
-                transcriber = null;
+                log.debug("transcriber.stop 异常: {}", e.getMessage());
+            }
+
+            try {
+                // 关闭底层连接，释放资源
+                localTranscriber.close();
+                // 等待连接完全关闭
+                Thread.sleep(200);
+            } catch (Exception e) {
+                log.debug("transcriber.close 异常: {}", e.getMessage());
             }
         }
-        log.info("ASR 会话已停止");
+        log.info("ASR 会话已停止并释放资源");
     }
 
-    private SpeechTranscriberListener getListener() {
+    /**
+     * 强制停止并释放所有资源，用于断连时确保资源被释放
+     * 优化：减少等待时间，快速释放
+     */
+    public void forceStop() {
+        isRunning = false;
+        SpeechTranscriber localTranscriber = this.transcriber;
+        this.transcriber = null;
+
+        if (localTranscriber != null) {
+            // 1. 先尝试正常stop，让服务端知道我们要停止
+            try {
+                localTranscriber.stop();
+            } catch (Exception e) {
+                log.debug("transcriber.stop 异常: {}", e.getMessage());
+            }
+
+            // 2. 立即关闭连接，不等待
+            try {
+                localTranscriber.close();
+            } catch (Exception e) {
+                log.debug("transcriber.close 异常: {}", e.getMessage());
+            }
+        }
+
+        log.info("ASR 会话已强制停止");
+    }
+
+    /**
+     * 检查ASR是否正在运行
+     */
+    public boolean isRunning() {
+        return isRunning && transcriber != null;
+    }
+
+    private SpeechTranscriberListener getListener(CountDownLatch readyLatch, AtomicReference<String> startError) {
         return new SpeechTranscriberListener() {
             @Override
             public void onTranscriberStart(SpeechTranscriberResponse response) {
                 log.info("任务开始 {}", response.getTaskId());
+                // 收到这个回调，说明连接成功，解锁 start() 方法
+                readyLatch.countDown();
             }
 
             @Override
@@ -159,29 +246,36 @@ public class AliyunRealtimeASR {
             }
 
             @Override
-            public void onSentenceBegin(SpeechTranscriberResponse response) {
-            }
+            public void onSentenceBegin(SpeechTranscriberResponse response) {}
 
             @Override
-            public void onTranscriptionResultChange(SpeechTranscriberResponse response) {
-            }
+            public void onTranscriptionResultChange(SpeechTranscriberResponse response) {}
 
             @Override
             public void onFail(SpeechTranscriberResponse response) {
                 log.error("ASR Error: {}", response.getStatusText());
+                startError.set(response.getStatusText());
+                // 即使失败也要解锁，让 start() 方法能抛出异常并结束
+                readyLatch.countDown();
             }
         };
     }
 
-    /**
-     * 重置 Opus 解码器，防止“corrupted stream”持续影响后续帧
-     */
-    private void resetDecoder() {
+    // 移除了 isClientOpen 方法
+
+    private boolean shouldBackoff(Throwable e) {
+        String msg = e.getMessage();
+        if (msg == null) return false;
+        String upper = msg.toUpperCase();
+        return upper.contains("TOO_MANY_REQUESTS") || upper.contains("GATEWAY:TOO_MANY_REQUESTS");
+    }
+
+    private void sleepBackoff() {
         try {
-            this.opusDecoder = new OpusDecoder(16000, 1);
-            log.info("Opus 解码器已重置");
-        } catch (Exception ex) {
-            log.error("Opus 解码器重置失败", ex);
+            log.warn("触发熔断机制，暂停 2 秒...");
+            Thread.sleep(2000);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
         }
     }
 }
