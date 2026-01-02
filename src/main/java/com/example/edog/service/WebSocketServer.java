@@ -43,6 +43,7 @@ public class WebSocketServer extends AbstractWebSocketHandler {
     private final Map<String, AliyunRealtimeASR> asrServices = new ConcurrentHashMap<>();
     private final Map<String, Timer> sessionTimers = new ConcurrentHashMap<>();
     private final Map<String, AtomicBoolean> sessionBusyState = new ConcurrentHashMap<>();
+    private final Map<String, AtomicBoolean> asrResettingState = new ConcurrentHashMap<>();
 
     private final Map<String, Long> lastAsrSendTime = new ConcurrentHashMap<>();
     private final Map<String, WebSocketSession> activeSessions = new ConcurrentHashMap<>();
@@ -134,6 +135,7 @@ public class WebSocketServer extends AbstractWebSocketHandler {
 
         activeSessions.put(id, session);
         sessionBusyState.put(id, new AtomicBoolean(false));
+        asrResettingState.put(id, new AtomicBoolean(false));
         sessionAwakeState.put(id, new AtomicBoolean(false)); // 初始为休眠状态，等待唤醒词
         lastAsrSendTime.put(id, System.currentTimeMillis());
         lastPongTime.put(id, System.currentTimeMillis());
@@ -268,6 +270,11 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         String id = session.getId();
         AliyunRealtimeASR asr = asrServices.get(id);
 
+        if (asr == null || !asr.isRunning()) {
+            ensureAsrReady(session, id);
+            return;
+        }
+
         if (asr != null) {
             try {
                 lastAsrSendTime.put(id, System.currentTimeMillis());
@@ -358,18 +365,34 @@ public class WebSocketServer extends AbstractWebSocketHandler {
 
         BlockingQueue<byte[]> frameQueue = new LinkedBlockingQueue<>();
         AtomicBoolean isComplete = new AtomicBoolean(false);
+        AtomicBoolean hasStarted = new AtomicBoolean(false);
 
         CompletableFuture.runAsync(() -> {
-            ttsService.synthesizeStream(text, frameQueue::offer, () -> isComplete.set(true));
+            ttsService.synthesizeStream(text, frame -> {
+                hasStarted.set(true);
+                frameQueue.offer(frame);
+            }, () -> isComplete.set(true));
         });
 
+        // 等待TTS开始生成（最多等待3秒）
+        int waitCount = 0;
+        while (!hasStarted.get() && waitCount < 30) {
+            Thread.sleep(100);
+            waitCount++;
+        }
+
+        // 短文本不需要太多预缓冲，长文本适当缓冲
+        int preBufferMs = text.length() <= 5 ? 50 : 100;
+        Thread.sleep(preBufferMs);
+
         while (!isComplete.get() || !frameQueue.isEmpty()) {
-            byte[] frame = frameQueue.poll(100, TimeUnit.MILLISECONDS);
+            byte[] frame = frameQueue.poll(50, TimeUnit.MILLISECONDS);
             if (frame != null) {
                 if (session.isOpen()) {
                     session.sendMessage(new BinaryMessage(frame));
                     lastAsrSendTime.put(id, System.currentTimeMillis());
-                    try { Thread.sleep(55); } catch (InterruptedException ignored) {}
+                    // Opus 60ms帧，发送间隔略小于帧时长以保持流畅
+                    Thread.sleep(45);
                 } else {
                     break;
                 }
@@ -518,21 +541,26 @@ public class WebSocketServer extends AbstractWebSocketHandler {
             return;
         }
 
-        setSessionBusy(sessionId, true);
+        // 使用原子操作确保只有一个线程能够进入
+        AtomicBoolean busyState = sessionBusyState.get(sessionId);
+        if (busyState == null || !busyState.compareAndSet(false, true)) {
+            log.debug("唤醒请求被拦截（并发保护）");
+            return;
+        }
 
         new Thread(() -> {
             try {
-                if (!session.isOpen()) {
-                    setSessionBusy(sessionId, false);
+                if (!session.isOpen() || !activeSessions.containsKey(sessionId)) {
                     return;
                 }
 
                 // 播放唤醒响应
                 log.info("播放唤醒响应: {}", WAKE_RESPONSE);
                 session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"start\"}"));
-                // 不再发送固定音量，让设备保持自己的音量设置
                 sendTtsStream(session, WAKE_RESPONSE);
-                session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"end\"}"));
+                if (session.isOpen()) {
+                    session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"end\"}"));
+                }
 
                 // 记录TTS结束时间
                 ttsEndTime.put(sessionId, System.currentTimeMillis());
@@ -544,11 +572,12 @@ public class WebSocketServer extends AbstractWebSocketHandler {
                 log.info("会话已唤醒，等待用户指令: {}", sessionId);
 
                 // 短暂延迟后解锁，开始监听用户指令
-                Thread.sleep(500);
-                setSessionBusy(sessionId, false);
+                Thread.sleep(300);
 
             } catch (Exception e) {
                 log.error("唤醒处理失败", e);
+            } finally {
+                // 确保无论如何都解锁
                 setSessionBusy(sessionId, false);
             }
         }).start();
@@ -588,7 +617,7 @@ public class WebSocketServer extends AbstractWebSocketHandler {
                     return;
                 }
 
-                // 先检测用户问题中是否有控制命令，如果有则先执行
+                // 先检测用户问题中是否有控制命令
                 String controlCommand = detectControlCommand(question);
                 if (controlCommand != null) {
                     log.info("检测到控制命令: {}, 原问题: {}", controlCommand, question);
@@ -597,6 +626,24 @@ public class WebSocketServer extends AbstractWebSocketHandler {
                         session.sendMessage(new TextMessage(controlCommand));
                         log.info("已发送控制命令到设备: {}", controlCommand);
                     }
+
+                    // 控制命令已执行，播放简短确认语音，不再请求智能体
+                    String confirmText = getControlCommandConfirmText(controlCommand);
+                    if (confirmText != null && session.isOpen()) {
+                        session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"start\"}"));
+                        sendTtsStream(session, confirmText);
+                        if (session.isOpen()) {
+                            session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"end\"}"));
+                        }
+                        ttsEndTime.put(sessionId, System.currentTimeMillis());
+                    }
+
+                    // 延迟后解锁
+                    Thread.sleep(800);
+                    setSessionAwake(sessionId, false);
+                    setSessionBusy(sessionId, false);
+                    log.info("控制命令处理完成，会话已解锁");
+                    return;
                 }
 
                 String shouldUseVoiceId = currentVoiceId;
@@ -693,6 +740,29 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         return null;
     }
 
+    /**
+     * 根据控制命令返回对应的确认语音文本
+     */
+    private String getControlCommandConfirmText(String command) {
+        if (command == null) return null;
+
+        if (command.contains("volume_up")) {
+            return "好的，音量已调高";
+        } else if (command.contains("volume_down")) {
+            return "好的，音量已调低";
+        } else if (command.contains("brightness_up")) {
+            return "好的，亮度已调高";
+        } else if (command.contains("brightness_down")) {
+            return "好的，亮度已调低";
+        } else if (command.contains("tem_up")) {
+            return "好的，色温已调暖";
+        } else if (command.contains("tem_down")) {
+            return "好的，色温已调冷";
+        }
+
+        return "好的";
+    }
+
     private void resetAsr(WebSocketSession session, String id, AliyunRealtimeASR oldAsr) {
         log.info("正在重置 ASR 会话: {}", id);
 
@@ -767,6 +837,24 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         }
     }
 
+    private void ensureAsrReady(WebSocketSession session, String id) {
+        if (!session.isOpen() || !activeSessions.containsKey(id)) {
+            return;
+        }
+        AtomicBoolean resetting = asrResettingState.computeIfAbsent(id, key -> new AtomicBoolean(false));
+        if (!resetting.compareAndSet(false, true)) {
+            return;
+        }
+        CompletableFuture.runAsync(() -> {
+            try {
+                AliyunRealtimeASR oldAsr = asrServices.get(id);
+                resetAsr(session, id, oldAsr);
+            } finally {
+                resetting.set(false);
+            }
+        });
+    }
+
     @Override
     public void afterConnectionClosed(@NotNull WebSocketSession session, @NotNull CloseStatus status) {
         String id = session.getId();
@@ -819,6 +907,7 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         lastAsrSendTime.remove(sessionId);
         lastPongTime.remove(sessionId);
         ttsEndTime.remove(sessionId);
+        asrResettingState.remove(sessionId);
 
         // 3. 清理设备映射（如果此会话是当前设备的活跃会话）
         if (session != null) {
