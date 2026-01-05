@@ -13,18 +13,14 @@ import org.springframework.web.socket.handler.AbstractWebSocketHandler;
 
 import java.nio.ByteBuffer;
 import java.util.Map;
-import java.util.Timer;
-import java.util.TimerTask;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.List;
+import java.util.ArrayList;
 
 @Service
 public class WebSocketServer extends AbstractWebSocketHandler {
@@ -41,31 +37,36 @@ public class WebSocketServer extends AbstractWebSocketHandler {
     private AliyunTTSService ttsService;
 
     private final Map<String, AliyunRealtimeASR> asrServices = new ConcurrentHashMap<>();
-    private final Map<String, Timer> sessionTimers = new ConcurrentHashMap<>();
-    private final Map<String, AtomicBoolean> sessionBusyState = new ConcurrentHashMap<>();
-    private final Map<String, AtomicBoolean> asrResettingState = new ConcurrentHashMap<>();
-
-    private final Map<String, Long> lastAsrSendTime = new ConcurrentHashMap<>();
+    // 使用全局调度池替代每个会话一个Timer，减少资源消耗
+    private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
     private final Map<String, WebSocketSession> activeSessions = new ConcurrentHashMap<>();
 
     // 心跳超时检测
-    private final Map<String, Long> lastPongTime = new ConcurrentHashMap<>();
-    private static final long HEARTBEAT_TIMEOUT_MS = 8000; // 8秒无响应视为断连
+    private static final long HEARTBEAT_TIMEOUT_MS = 30000; // 延长至30秒，适应不稳定网络
 
     // 设备标识映射，用于检测同一设备重连（通过远程地址或设备ID）
     private final Map<String, String> deviceToSessionMap = new ConcurrentHashMap<>();
 
-    // TTS播放结束后的静默期，防止麦克风拾取自己的声音导致自说自话
-    private final Map<String, Long> ttsEndTime = new ConcurrentHashMap<>();
     private static final long TTS_SILENCE_PERIOD_MS = 1500; // TTS结束后1.5秒内忽略ASR结果
 
     // 唤醒词机制相关
-    private final Map<String, AtomicBoolean> sessionAwakeState = new ConcurrentHashMap<>(); // 会话是否已被唤醒
-    private final Map<String, Long> awakeTime = new ConcurrentHashMap<>(); // 唤醒时间，用于超时自动休眠
     private static final long AWAKE_TIMEOUT_MS = 30000; // 唤醒后30秒无响应则自动休眠
     private static final String WAKE_WORD_PINYIN = "xiaoaitongxue"; // 唤醒词拼音
     private static final String WAKE_RESPONSE = "我在呢"; // 唤醒词响应
     private static final double WAKE_WORD_SIMILARITY_THRESHOLD = 0.75; // 唤醒词相似度阈值
+
+    private static final class SessionState {
+        private final AtomicBoolean busy = new AtomicBoolean(false);
+        private final AtomicBoolean resettingAsr = new AtomicBoolean(false);
+        private final AtomicBoolean awake = new AtomicBoolean(false);
+        private volatile long lastAsrSendTime;
+        private volatile long lastPongTime;
+        private volatile long ttsEndTime;
+        private volatile long awakeTime;
+        private volatile List<ScheduledFuture<?>> tasks;
+    }
+
+    private final Map<String, SessionState> sessionStates = new ConcurrentHashMap<>();
 
     private final CozeAPI cozeAPI = new CozeAPI();
 
@@ -115,6 +116,61 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         log.info("语音参数已全局更新: voiceId={}, speed={}, volume={}", currentVoiceId, currentSpeedRatio, currentVolume);
     }
 
+    private void registerSession(WebSocketSession session, String sessionId) {
+        activeSessions.put(sessionId, session);
+        SessionState state = new SessionState();
+        long now = System.currentTimeMillis();
+        state.lastAsrSendTime = now;
+        state.lastPongTime = now;
+        state.ttsEndTime = 0;
+        state.awakeTime = 0;
+        sessionStates.put(sessionId, state);
+    }
+
+    private List<ScheduledFuture<?>> scheduleSessionTasks(WebSocketSession session, String sessionId) {
+        SessionState state = sessionStates.get(sessionId);
+        if (state == null) return new ArrayList<>();
+
+        List<ScheduledFuture<?>> tasks = new ArrayList<>();
+
+        tasks.add(scheduler.scheduleAtFixedRate(() -> {
+            try {
+                if (session.isOpen()) session.sendMessage(new PingMessage());
+            } catch (Exception e) {
+                cleanupSession(sessionId, "心跳发送失败");
+            }
+        }, 2, 5, TimeUnit.SECONDS));
+
+        tasks.add(scheduler.scheduleAtFixedRate(() -> {
+            if (!activeSessions.containsKey(sessionId)) return;
+            if (System.currentTimeMillis() - state.lastPongTime > HEARTBEAT_TIMEOUT_MS) {
+                log.warn("心跳超时: session={}", sessionId);
+                cleanupSession(sessionId, "心跳超时");
+                try { session.close(CloseStatus.GOING_AWAY); } catch (Exception ignored) {}
+            }
+        }, 10, 5, TimeUnit.SECONDS));
+
+        tasks.add(scheduler.scheduleAtFixedRate(() -> {
+            if (!session.isOpen() || !activeSessions.containsKey(sessionId)) return;
+            AliyunRealtimeASR currentAsr = asrServices.get(sessionId);
+            if (currentAsr == null || !currentAsr.isRunning()) return;
+
+            long now = System.currentTimeMillis();
+            if (now - state.lastAsrSendTime <= 800) return;
+
+            try {
+                currentAsr.sendOpusStream(OPUS_SILENCE_FRAME);
+                state.lastAsrSendTime = now;
+            } catch (Exception e) {
+                // 静音帧发送失败不应该触发ASR重置，只记录日志
+                log.debug("静音帧发送异常（忽略）: {}", e.getMessage());
+            }
+        }, 1, 1, TimeUnit.SECONDS));
+
+        state.tasks = tasks;
+        return tasks;
+    }
+
     @Override
     public void afterConnectionEstablished(@NotNull WebSocketSession session) throws Exception {
         String id = session.getId();
@@ -133,136 +189,18 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         // 记录设备-会话映射
         deviceToSessionMap.put(deviceKey, id);
 
-        activeSessions.put(id, session);
-        sessionBusyState.put(id, new AtomicBoolean(false));
-        asrResettingState.put(id, new AtomicBoolean(false));
-        sessionAwakeState.put(id, new AtomicBoolean(false)); // 初始为休眠状态，等待唤醒词
-        lastAsrSendTime.put(id, System.currentTimeMillis());
-        lastPongTime.put(id, System.currentTimeMillis());
-
-        AliyunRealtimeASR asr = new AliyunRealtimeASR(credentials.getAppKey());
-        asr.setOnResultCallback(text -> {
-            // 验证session是否仍然有效（防止设备重连后旧回调触发）
-            if (!activeSessions.containsKey(id)) {
-                log.debug("忽略已清理会话的ASR回调: {}", id);
-                return;
-            }
-            // 验证当前ASR是否是此会话的活跃ASR
-            AliyunRealtimeASR currentAsr = asrServices.get(id);
-            if (currentAsr == null || currentAsr != asr) {
-                log.debug("忽略已替换ASR实例的回调: {}", id);
-                return;
-            }
-            if (isSessionBusy(id)) return;
-            handleAsrText(session, id, text);
-        });
+        registerSession(session, id);
 
         try {
-            String token = tokenService.getToken();
-            asr.start(token);
-            asrServices.put(id, asr);
-            log.info("ASR 初始启动成功: {}", id);
+            AliyunRealtimeASR asr = startAsrForSession(session, id);
+            if (asr != null) {
+                log.info("ASR 初始启动成功: {}", id);
+            }
         } catch (Exception e) {
             log.error("ASR 初始启动失败: {}", e.getMessage());
-            // 确保启动失败时释放资源
-            try {
-                asr.forceStop();
-            } catch (Exception ignored) {}
-            // 不放入asrServices，后续重试逻辑可以处理
         }
 
-        // 启动定时任务
-        Timer timer = new Timer(true);
-
-        // 1. WebSocket 心跳 - 每2秒发送一次，更快检测断连
-        timer.scheduleAtFixedRate(new TimerTask() {
-            @Override
-            public void run() {
-                try {
-                    if (session.isOpen()) {
-                        session.sendMessage(new PingMessage());
-                    } else {
-                        // session已关闭，触发清理
-                        log.warn("心跳检测到session已关闭: {}", id);
-                        cleanupSession(id, "心跳检测session关闭");
-                    }
-                } catch (Exception e) {
-                    log.warn("发送心跳失败，可能已断连: {}", e.getMessage());
-                    cleanupSession(id, "心跳发送失败");
-                }
-            }
-        }, 2000, 2000);
-
-        // 2. 心跳超时检测任务
-        timer.scheduleAtFixedRate(new TimerTask() {
-            @Override
-            public void run() {
-                String currentId = id;
-                try {
-                    if (!activeSessions.containsKey(currentId)) {
-                        return;
-                    }
-
-                    long lastPong = lastPongTime.getOrDefault(currentId, 0L);
-                    long now = System.currentTimeMillis();
-
-                    if (now - lastPong > HEARTBEAT_TIMEOUT_MS) {
-                        log.warn("心跳超时检测: session={}, lastPong={}ms前", currentId, now - lastPong);
-                        // 触发会话清理
-                        cleanupSession(currentId, "心跳超时");
-                        // 尝试关闭WebSocket连接
-                        try {
-                            if (session.isOpen()) {
-                                session.close(CloseStatus.GOING_AWAY);
-                            }
-                        } catch (Exception ignored) {}
-                    }
-                } catch (Exception e) {
-                    log.error("心跳超时检测异常: {}", e.getMessage());
-                }
-            }
-        }, 10000, 5000);
-
-        // 3. ASR 保活任务 & 重试逻辑
-        timer.scheduleAtFixedRate(new TimerTask() {
-            @Override
-            public void run() {
-                String currentId = id;
-                try {
-                    // 如果会话已关闭或不在活跃列表中，不再执行任何操作
-                    if (!session.isOpen() || !activeSessions.containsKey(currentId)) {
-                        return;
-                    }
-
-                    AliyunRealtimeASR currentAsr = asrServices.get(currentId);
-
-                    // 如果 ASR 不存在或已停止，不处理（由其他逻辑负责重建）
-                    if (currentAsr == null || !currentAsr.isRunning()) {
-                        return;
-                    }
-
-                    long lastTime = lastAsrSendTime.getOrDefault(currentId, 0L);
-                    long now = System.currentTimeMillis();
-
-                    // 发送静音帧保活
-                    if (now - lastTime > 800) {
-                        currentAsr.sendOpusStream(OPUS_SILENCE_FRAME);
-                        lastAsrSendTime.put(currentId, now);
-                    }
-                } catch (Exception e) {
-                    log.error("保活检查异常: {}", e.getMessage());
-                    // 只有会话仍然活跃时才尝试重置
-                    if (session.isOpen() && activeSessions.containsKey(currentId)) {
-                        AliyunRealtimeASR oldAsr = asrServices.get(currentId);
-                        if (oldAsr != null) {
-                            resetAsr(session, currentId, oldAsr);
-                        }
-                    }
-                }
-            }
-        }, 1000, 500);
-
-        sessionTimers.put(id, timer);
+        scheduleSessionTasks(session, id);
     }
 
     @Override
@@ -275,24 +213,27 @@ public class WebSocketServer extends AbstractWebSocketHandler {
             return;
         }
 
-        if (asr != null) {
-            try {
-                lastAsrSendTime.put(id, System.currentTimeMillis());
+        try {
+            SessionState state = sessionStates.get(id);
+            if (state != null) state.lastAsrSendTime = System.currentTimeMillis();
 
-                if (isSessionBusy(id)) {
-                    // 忙碌时只发静音帧维持连接，不识别
-                    asr.sendOpusStream(OPUS_SILENCE_FRAME);
-                } else {
-                    ByteBuffer payload = message.getPayload();
-                    byte[] opusData = new byte[payload.remaining()];
-                    payload.get(opusData);
+            if (isSessionBusy(id)) {
+                // 忙碌时只发静音帧维持连接，不识别
+                asr.sendOpusStream(OPUS_SILENCE_FRAME);
+            } else {
+                ByteBuffer payload = message.getPayload();
+                byte[] opusData = new byte[payload.remaining()];
+                payload.get(opusData);
+                
+                // 验证数据有效性：检查是否为有效的Opus帧
+                if (opusData.length > 0) {
                     asr.sendOpusStream(opusData);
                 }
-            } catch (Exception e) {
-                // 如果这里报错，说明 ASR 可能断了，触发重置
-                log.error("ASR 发送流异常, 触发重置", e);
-                resetAsr(session, id, asr);
             }
+        } catch (Exception e) {
+            // 捕获所有异常，避免因为数据处理错误导致连接断开
+            log.debug("处理音频数据时出现异常（连接保持）: {}", e.getMessage());
+            // 不再触发resetAsr，让解码器自行恢复
         }
     }
 
@@ -390,7 +331,8 @@ public class WebSocketServer extends AbstractWebSocketHandler {
             if (frame != null) {
                 if (session.isOpen()) {
                     session.sendMessage(new BinaryMessage(frame));
-                    lastAsrSendTime.put(id, System.currentTimeMillis());
+                    SessionState state = sessionStates.get(id);
+                    if (state != null) state.lastAsrSendTime = System.currentTimeMillis();
                     // Opus 60ms帧，发送间隔略小于帧时长以保持流畅
                     Thread.sleep(45);
                 } else {
@@ -398,6 +340,18 @@ public class WebSocketServer extends AbstractWebSocketHandler {
                 }
             }
         }
+    }
+
+    private void playTts(WebSocketSession session, String sessionId, String text) throws Exception {
+        if (text == null || text.isEmpty()) return;
+        if (!session.isOpen() || !activeSessions.containsKey(sessionId)) return;
+        session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"start\"}"));
+        sendTtsStream(session, text);
+        if (session.isOpen()) {
+            session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"end\"}"));
+        }
+        SessionState state = sessionStates.get(sessionId);
+        if (state != null) state.ttsEndTime = System.currentTimeMillis();
     }
 
     private void handleAsrText(WebSocketSession session, String sessionId, String text) {
@@ -409,14 +363,14 @@ public class WebSocketServer extends AbstractWebSocketHandler {
             return;
         }
 
+        SessionState state = sessionStates.get(sessionId);
+        if (state == null) return;
+
         // 检查是否在TTS播放后的静默期内，防止自说自话
-        Long lastTtsEnd = ttsEndTime.get(sessionId);
-        if (lastTtsEnd != null) {
-            long elapsed = System.currentTimeMillis() - lastTtsEnd;
-            if (elapsed < TTS_SILENCE_PERIOD_MS) {
-                log.debug("忽略静默期内的ASR结果 ({}ms): {}", elapsed, text.trim());
-                return;
-            }
+        long elapsed = System.currentTimeMillis() - state.ttsEndTime;
+        if (elapsed < TTS_SILENCE_PERIOD_MS) {
+            log.debug("忽略静默期内的ASR结果 ({}ms): {}", elapsed, text.trim());
+            return;
         }
 
         String question = text.trim();
@@ -433,8 +387,7 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         }
 
         // 检查会话是否已唤醒
-        AtomicBoolean awakeState = sessionAwakeState.get(sessionId);
-        boolean isAwake = awakeState != null && awakeState.get();
+        boolean isAwake = state.awake.get();
 
         if (!isAwake) {
             // 未唤醒状态，忽略非唤醒词的语音
@@ -443,8 +396,7 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         }
 
         // 检查唤醒是否超时
-        Long awakeAt = awakeTime.get(sessionId);
-        if (awakeAt != null && System.currentTimeMillis() - awakeAt > AWAKE_TIMEOUT_MS) {
+        if (System.currentTimeMillis() - state.awakeTime > AWAKE_TIMEOUT_MS) {
             log.info("唤醒已超时，进入休眠状态");
             setSessionAwake(sessionId, false);
             return;
@@ -542,7 +494,9 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         }
 
         // 使用原子操作确保只有一个线程能够进入
-        AtomicBoolean busyState = sessionBusyState.get(sessionId);
+        SessionState state = sessionStates.get(sessionId);
+        if (state == null) return;
+        AtomicBoolean busyState = state.busy;
         if (busyState == null || !busyState.compareAndSet(false, true)) {
             log.debug("唤醒请求被拦截（并发保护）");
             return;
@@ -554,20 +508,12 @@ public class WebSocketServer extends AbstractWebSocketHandler {
                     return;
                 }
 
-                // 播放唤醒响应
                 log.info("播放唤醒响应: {}", WAKE_RESPONSE);
-                session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"start\"}"));
-                sendTtsStream(session, WAKE_RESPONSE);
-                if (session.isOpen()) {
-                    session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"end\"}"));
-                }
-
-                // 记录TTS结束时间
-                ttsEndTime.put(sessionId, System.currentTimeMillis());
+                playTts(session, sessionId, WAKE_RESPONSE);
 
                 // 设置会话为已唤醒状态
                 setSessionAwake(sessionId, true);
-                awakeTime.put(sessionId, System.currentTimeMillis());
+                state.awakeTime = System.currentTimeMillis();
 
                 log.info("会话已唤醒，等待用户指令: {}", sessionId);
 
@@ -587,11 +533,10 @@ public class WebSocketServer extends AbstractWebSocketHandler {
      * 设置会话唤醒状态
      */
     private void setSessionAwake(String sessionId, boolean awake) {
-        AtomicBoolean state = sessionAwakeState.get(sessionId);
-        if (state != null) {
-            state.set(awake);
-            log.info("会话唤醒状态变更: {} -> {}", sessionId, awake ? "已唤醒" : "休眠");
-        }
+        SessionState state = sessionStates.get(sessionId);
+        if (state == null) return;
+        state.awake.set(awake);
+        log.info("会话唤醒状态变更: {} -> {}", sessionId, awake ? "已唤醒" : "休眠");
     }
 
     private void handleUserQuestion(WebSocketSession session, String sessionId, String question) {
@@ -602,7 +547,9 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         }
 
         // 如果已经在忙碌状态，防止重复调用
-        AtomicBoolean busyState = sessionBusyState.get(sessionId);
+        SessionState state = sessionStates.get(sessionId);
+        if (state == null) return;
+        AtomicBoolean busyState = state.busy;
         if (busyState == null || !busyState.compareAndSet(false, true)) {
             log.warn("handleUserQuestion: 会话忙碌中或状态异常，跳过: {}", sessionId);
             return;
@@ -629,13 +576,8 @@ public class WebSocketServer extends AbstractWebSocketHandler {
 
                     // 控制命令已执行，播放简短确认语音，不再请求智能体
                     String confirmText = getControlCommandConfirmText(controlCommand);
-                    if (confirmText != null && session.isOpen()) {
-                        session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"start\"}"));
-                        sendTtsStream(session, confirmText);
-                        if (session.isOpen()) {
-                            session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"end\"}"));
-                        }
-                        ttsEndTime.put(sessionId, System.currentTimeMillis());
+                    if (confirmText != null) {
+                        playTts(session, sessionId, confirmText);
                     }
 
                     // 延迟后解锁
@@ -658,28 +600,16 @@ public class WebSocketServer extends AbstractWebSocketHandler {
 
                     if (!session.isOpen()) { setSessionBusy(sessionId, false); return; }
 
-                    session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"start\"}"));
-                    // 不再发送固定音量，让设备保持自己的音量设置
-                    sendTtsStream(session, replyText);
-
-                    if (session.isOpen()) {
-                        session.sendMessage(new TextMessage("{\"type\":\"tts\",\"state\":\"end\"}"));
-                    }
-
-                    // 记录TTS结束时间，用于静默期检测
-                    ttsEndTime.put(sessionId, System.currentTimeMillis());
+                    playTts(session, sessionId, replyText);
 
                     // 延长解锁延迟，等待声音完全播放完毕和回声消散
                     long unlockDelay = 1200;
-                    new Timer().schedule(new TimerTask() {
-                        @Override
-                        public void run() {
-                            // 处理完成后设为休眠状态，需要再次唤醒
-                            setSessionAwake(sessionId, false);
-                            setSessionBusy(sessionId, false);
-                            log.info("会话已解锁并进入休眠状态，等待唤醒词");
-                        }
-                    }, unlockDelay);
+                    scheduler.schedule(() -> {
+                        // 处理完成后设为休眠状态，需要再次唤醒
+                        setSessionAwake(sessionId, false);
+                        setSessionBusy(sessionId, false);
+                        log.info("会话已解锁并进入休眠状态，等待唤醒词");
+                    }, unlockDelay, TimeUnit.MILLISECONDS);
 
                 } else {
                     setSessionAwake(sessionId, false);
@@ -694,13 +624,48 @@ public class WebSocketServer extends AbstractWebSocketHandler {
     }
 
     private boolean isSessionBusy(String sessionId) {
-        AtomicBoolean state = sessionBusyState.get(sessionId);
-        return state != null && state.get();
+        SessionState state = sessionStates.get(sessionId);
+        return state != null && state.busy.get();
     }
 
     private void setSessionBusy(String sessionId, boolean busy) {
-        AtomicBoolean state = sessionBusyState.get(sessionId);
-        if (state != null) state.set(busy);
+        SessionState state = sessionStates.get(sessionId);
+        if (state != null) state.busy.set(busy);
+    }
+
+    private AliyunRealtimeASR startAsrForSession(WebSocketSession session, String sessionId) {
+        if (!session.isOpen() || !activeSessions.containsKey(sessionId)) return null;
+
+        AliyunRealtimeASR asr = new AliyunRealtimeASR(credentials.getAppKey());
+        asr.setOnResultCallback(text -> {
+            if (!activeSessions.containsKey(sessionId)) {
+                return;
+            }
+            AliyunRealtimeASR currentAsr = asrServices.get(sessionId);
+            if (currentAsr == null || currentAsr != asr) {
+                return;
+            }
+            if (isSessionBusy(sessionId)) return;
+            handleAsrText(session, sessionId, text);
+        });
+
+        asrServices.put(sessionId, asr);
+        try {
+            String token = tokenService.getToken();
+            asr.start(token);
+        } catch (Exception e) {
+            asrServices.remove(sessionId, asr);
+            try { asr.forceStop(); } catch (Exception ignored) {}
+            throw e;
+        }
+
+        if (!session.isOpen() || !activeSessions.containsKey(sessionId)) {
+            asrServices.remove(sessionId, asr);
+            asr.forceStop();
+            return null;
+        }
+
+        return asr;
     }
 
     /**
@@ -798,42 +763,13 @@ public class WebSocketServer extends AbstractWebSocketHandler {
             return;
         }
 
-        AliyunRealtimeASR asr = new AliyunRealtimeASR(credentials.getAppKey());
-        asr.setOnResultCallback(text -> {
-            // 验证session是否仍然有效（防止设备重连后旧回调触发）
-            if (!activeSessions.containsKey(id)) {
-                log.debug("忽略已清理会话的ASR回调: {}", id);
-                return;
-            }
-            // 验证当前ASR是否是此会话的活跃ASR
-            AliyunRealtimeASR currentAsr = asrServices.get(id);
-            if (currentAsr == null || currentAsr != asr) {
-                log.debug("忽略已替换ASR实例的回调: {}", id);
-                return;
-            }
-            if (isSessionBusy(id)) return;
-            handleAsrText(session, id, text);
-        });
-
         try {
-            String token = tokenService.getToken();
-            asr.start(token);
-
-            // 再次检查会话状态，如果已关闭则停止新创建的ASR
-            if (!session.isOpen()) {
-                asr.forceStop();
-                log.info("ASR 启动后发现会话已关闭，已释放");
-                return;
+            AliyunRealtimeASR asr = startAsrForSession(session, id);
+            if (asr != null) {
+                log.info("ASR 重置成功: {}", id);
             }
-
-            asrServices.put(id, asr);
-            log.info("ASR 重置成功: {}", id);
         } catch (Exception e) {
             log.error("ASR 重置启动失败: {}", e.getMessage());
-            // 确保失败时也释放资源
-            try {
-                asr.forceStop();
-            } catch (Exception ignored) {}
         }
     }
 
@@ -841,8 +777,9 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         if (!session.isOpen() || !activeSessions.containsKey(id)) {
             return;
         }
-        AtomicBoolean resetting = asrResettingState.computeIfAbsent(id, key -> new AtomicBoolean(false));
-        if (!resetting.compareAndSet(false, true)) {
+        SessionState state = sessionStates.get(id);
+        if (state == null) return;
+        if (!state.resettingAsr.compareAndSet(false, true)) {
             return;
         }
         CompletableFuture.runAsync(() -> {
@@ -850,7 +787,7 @@ public class WebSocketServer extends AbstractWebSocketHandler {
                 AliyunRealtimeASR oldAsr = asrServices.get(id);
                 resetAsr(session, id, oldAsr);
             } finally {
-                resetting.set(false);
+                state.resettingAsr.set(false);
             }
         });
     }
@@ -882,54 +819,31 @@ public class WebSocketServer extends AbstractWebSocketHandler {
     private synchronized void cleanupSession(String sessionId, String reason) {
         log.info("开始清理会话: id={}, reason={}", sessionId, reason);
 
-        // 检查是否已经清理过
         if (!activeSessions.containsKey(sessionId) && !asrServices.containsKey(sessionId)) {
-            log.debug("会话已被清理过，跳过: {}", sessionId);
             return;
         }
 
-        // 1. 先取消定时器，防止在清理过程中触发保活任务
-        Timer timer = sessionTimers.remove(sessionId);
-        if (timer != null) {
-            try {
-                timer.cancel();
-                timer.purge();
-            } catch (Exception e) {
-                log.debug("取消定时器异常: {}", e.getMessage());
-            }
+        // 1. 取消所有定时任务
+        SessionState state = sessionStates.remove(sessionId);
+        if (state != null && state.tasks != null) {
+            state.tasks.forEach(t -> t.cancel(false));
         }
 
         // 2. 移除会话相关状态
         WebSocketSession session = activeSessions.remove(sessionId);
-        sessionBusyState.remove(sessionId);
-        sessionAwakeState.remove(sessionId); // 清理唤醒状态
-        awakeTime.remove(sessionId); // 清理唤醒时间
-        lastAsrSendTime.remove(sessionId);
-        lastPongTime.remove(sessionId);
-        ttsEndTime.remove(sessionId);
-        asrResettingState.remove(sessionId);
 
-        // 3. 清理设备映射（如果此会话是当前设备的活跃会话）
+        // 3. 清理设备映射
         if (session != null) {
-            String deviceKey = getDeviceKey(session);
-            deviceToSessionMap.remove(deviceKey, sessionId);
+            deviceToSessionMap.remove(getDeviceKey(session), sessionId);
         }
 
-        // 4. 异步强制停止ASR资源，不阻塞主流程
+        // 4. 异步强制停止ASR资源
         AliyunRealtimeASR asr = asrServices.remove(sessionId);
         if (asr != null) {
-            final String sid = sessionId;
             CompletableFuture.runAsync(() -> {
-                try {
-                    asr.forceStop();
-                    log.info("已释放 ASR 资源: {}", sid);
-                } catch (Exception e) {
-                    log.error("释放 ASR 资源失败: {}", e.getMessage());
-                }
+                try { asr.forceStop(); } catch (Exception ignored) {}
             });
         }
-
-        log.info("会话清理完成: id={}, reason={}", sessionId, reason);
     }
 
     /**
@@ -938,16 +852,26 @@ public class WebSocketServer extends AbstractWebSocketHandler {
     @Override
     protected void handlePongMessage(@NotNull WebSocketSession session, @NotNull PongMessage message) {
         String id = session.getId();
-        lastPongTime.put(id, System.currentTimeMillis());
+        SessionState state = sessionStates.get(id);
+        if (state != null) state.lastPongTime = System.currentTimeMillis();
     }
 
     @Override
     public void handleTransportError(@NotNull WebSocketSession session, @NotNull Throwable exception) {
         String id = session.getId();
-        log.error("WebSocket 传输错误: id={}, error={}", id, exception.getMessage());
+        String errorMsg = exception.getMessage();
+        
+        // 检查是否是可恢复的错误（如解码错误）
+        if (errorMsg != null && (errorMsg.contains("decoding") || errorMsg.contains("corrupted"))) {
+            log.warn("WebSocket 可恢复错误: id={}, error={}", id, errorMsg);
+            // 不清理会话，让连接继续
+            return;
+        }
+        
+        log.error("WebSocket 传输错误: id={}, error={}", id, errorMsg);
 
-        // 传输错误时主动清理会话
-        cleanupSession(id, "传输错误: " + exception.getMessage());
+        // 只有真正的传输错误才清理会话
+        cleanupSession(id, "传输错误: " + errorMsg);
     }
 
     @Override

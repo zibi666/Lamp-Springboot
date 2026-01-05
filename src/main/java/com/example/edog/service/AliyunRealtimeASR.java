@@ -37,13 +37,34 @@ public class AliyunRealtimeASR {
     private final short[] pcmBuffer = new short[5760];
     private final String appKey;
 
+    // 解码器错误计数，用于触发重置
+    private volatile int decodeErrorCount = 0;
+    private static final int MAX_DECODE_ERRORS = 3; // 连续3次解码失败后重置解码器
+
     public AliyunRealtimeASR(String appKey) {
         this.appKey = appKey;
+        initOpusDecoder();
+    }
+
+    /**
+     * 初始化或重置Opus解码器
+     */
+    private synchronized void initOpusDecoder() {
         try {
             this.opusDecoder = new OpusDecoder(16000, 1);
+            this.decodeErrorCount = 0;
+            log.debug("Opus decoder 初始化成功");
         } catch (OpusException e) {
             log.error("Opus decoder 初始化失败", e);
         }
+    }
+
+    /**
+     * 重置Opus解码器，用于从损坏的流状态恢复
+     */
+    private synchronized void resetOpusDecoder() {
+        log.info("重置Opus解码器以恢复解码状态");
+        initOpusDecoder();
     }
 
     public void setOnResultCallback(Consumer<String> callback) {
@@ -142,9 +163,19 @@ public class AliyunRealtimeASR {
             return;
         }
 
+        // 检查解码器是否可用
+        if (opusDecoder == null) {
+            log.warn("OpusDecoder is null, attempting to reinitialize");
+            initOpusDecoder();
+            if (opusDecoder == null) return;
+        }
+
         try {
             int samples = opusDecoder.decode(opusBytes, 0, opusBytes.length, pcmBuffer, 0, pcmBuffer.length, false);
             if (samples > 0) {
+                // 解码成功，重置错误计数
+                decodeErrorCount = 0;
+                
                 byte[] pcmData = new byte[samples * 2];
                 for (int i = 0; i < samples; i++) {
                     short s = pcmBuffer[i];
@@ -154,9 +185,21 @@ public class AliyunRealtimeASR {
                 transcriber.send(pcmData);
             }
         } catch (Exception e) {
-            // 这里只打印 warn，不要抛出异常导致 WebSocket 断开
-            // 也不要打印堆栈，防止刷屏
-            log.warn("ASR 发送数据异常: {}", e.getMessage());
+            // 解码异常处理：不要让异常导致连接断开
+            decodeErrorCount++;
+            
+            // 只在首次失败时打印警告，避免日志刷屏
+            if (decodeErrorCount == 1) {
+                log.warn("ASR Opus解码异常 (将尝试恢复): {}", e.getMessage());
+            }
+            
+            // 连续多次解码失败，重置解码器
+            if (decodeErrorCount >= MAX_DECODE_ERRORS) {
+                log.info("连续{}次解码失败，重置解码器", decodeErrorCount);
+                resetOpusDecoder();
+            }
+            
+            // 不抛出异常，让连接保持
         }
     }
 
