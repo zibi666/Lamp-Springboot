@@ -37,72 +37,92 @@ public class UserAlarmsServiceImpl extends ServiceImpl<UserAlarmsMapper, UserAla
     private static final String[] DAY_NAMES = {"", "周一", "周二", "周三", "周四", "周五", "周六", "周日"};
     
     @Override
-    public long createAlarm(AlarmCreateRequest request) {
+    public String createAlarm(AlarmCreateRequest request) {
         try {
             // 参数验证
             if (request == null || request.getUserId() == null || request.getAlarmTime() == null) {
                 log.warn("创建闹钟参数不完整");
-                return -1;
+                return "参数不完整";
             }
             
             if (request.getType() == null || (request.getType() != ALARM_TYPE_ONE_TIME && request.getType() != ALARM_TYPE_RECURRING)) {
                 log.warn("闹钟类型不正确");
-                return -1;
+                return "闹钟类型不正确";
             }
             
             // 单次闹钟必须有targetDate
             if (ALARM_TYPE_ONE_TIME.equals(request.getType()) && (request.getTargetDate() == null || request.getTargetDate().isEmpty())) {
                 log.warn("单次闹钟必须指定目标日期");
-                return -1;
+                return "单次闹钟必须指定目标日期";
             }
             
             // 循环闹钟必须有repeatDays
             if (ALARM_TYPE_RECURRING.equals(request.getType()) && (request.getRepeatDays() == null || request.getRepeatDays().isEmpty())) {
                 log.warn("循环闹钟必须指定重复日期");
-                return -1;
+                return "循环闹钟必须指定重复日期";
+            }
+            
+            // 解析时间
+            LocalTime alarmTime;
+            try {
+                alarmTime = LocalTime.parse(request.getAlarmTime(), DateTimeFormatter.ofPattern("HH:mm[:ss]"));
+            } catch (Exception e) {
+                log.warn("时间格式错误: {}", request.getAlarmTime());
+                return "时间格式错误";
+            }
+
+            // 解析日期（如果是单次闹钟）
+            LocalDate targetDate = null;
+            if (ALARM_TYPE_ONE_TIME.equals(request.getType())) {
+                try {
+                    targetDate = LocalDate.parse(request.getTargetDate(), DATE_FORMATTER);
+                } catch (Exception e) {
+                    log.warn("日期格式错误: {}", request.getTargetDate());
+                    return "日期格式错误";
+                }
+            }
+
+            // 检查重复闹钟
+            UserAlarms existingAlarm = baseMapper.selectDuplicateAlarm(request.getUserId(), alarmTime, request.getType(), targetDate);
+            if (existingAlarm != null) {
+                existingAlarm.setUpdatedAt(LocalDateTime.now());
+                updateById(existingAlarm);
+                return "闹钟已存在";
             }
             
             UserAlarms alarm = new UserAlarms();
             alarm.setUserId(request.getUserId());
-            
-            // 解析时间
-            try {
-                LocalTime alarmTime = LocalTime.parse(request.getAlarmTime(), DateTimeFormatter.ofPattern("HH:mm[:ss]"));
-                alarm.setAlarmTime(alarmTime);
-            } catch (Exception e) {
-                log.warn("时间格式错误: {}", request.getAlarmTime());
-                return -1;
-            }
-            
+            alarm.setAlarmTime(alarmTime);
             alarm.setType(request.getType());
             
             if (ALARM_TYPE_ONE_TIME.equals(request.getType())) {
-                try {
-                    LocalDate targetDate = LocalDate.parse(request.getTargetDate(), DATE_FORMATTER);
-                    alarm.setTargetDate(targetDate);
-                } catch (Exception e) {
-                    log.warn("日期格式错误: {}", request.getTargetDate());
-                    return -1;
-                }
+                alarm.setTargetDate(targetDate);
                 alarm.setRepeatDays(null);
             } else {
                 alarm.setRepeatDays(request.getRepeatDays());
                 alarm.setTargetDate(null);
             }
             
-            alarm.setTag(request.getTag() != null ? request.getTag() : "");
+            // 设置Tag，默认为“无”
+            String tag = request.getTag();
+            if (tag == null || tag.trim().isEmpty()) {
+                tag = "无";
+            }
+            alarm.setTag(tag);
+            
             alarm.setStatus(ALARM_STATUS_ENABLED);
             alarm.setCreatedAt(LocalDateTime.now());
             alarm.setUpdatedAt(LocalDateTime.now());
             
-            // 保存到数据库
-            this.save(alarm);
-            log.info("闹钟创建成功，用户ID: {}, 闹钟ID: {}", request.getUserId(), alarm.getId());
-            return alarm.getId();
+            if (save(alarm)) {
+                return "创建成功";
+            } else {
+                return "创建失败";
+            }
             
         } catch (Exception e) {
             log.error("创建闹钟异常", e);
-            return -1;
+            return "服务器异常: " + e.getMessage();
         }
     }
     

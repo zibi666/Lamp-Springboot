@@ -33,40 +33,28 @@ public class AlarmsController {
      * POST /api/alarms/create
      *
      * @param request 创建闹钟请求对象
-     * @return 响应结果
+     * @return 响应结果字符串
      */
     @PostMapping("/create")
-    public ResponseEntity<Map<String, Object>> createAlarm(@RequestBody AlarmCreateRequest request) {
-        Map<String, Object> response = new HashMap<>();
-        
+    public ResponseEntity<String> createAlarm(@RequestBody AlarmCreateRequest request) {
         try {
             if (request.getUserId() == null || request.getUserId().isEmpty()) {
-                response.put("code", 400);
-                response.put("message", "用户ID不能为空");
-                response.put("success", false);
-                return ResponseEntity.badRequest().body(response);
+                return ResponseEntity.badRequest().body("用户ID不能为空");
             }
             
-            long alarmId = userAlarmsService.createAlarm(request);
+            String result = userAlarmsService.createAlarm(request);
             
-            if (alarmId > 0) {
-                response.put("code", 200);
-                response.put("message", "闹钟创建成功");
-                response.put("success", true);
-                response.put("data", Map.of("alarmId", alarmId));
-                return ResponseEntity.ok(response);
-            } else {
-                response.put("code", 400);
-                response.put("message", "闹钟创建失败，请检查参数");
-                response.put("success", false);
-                return ResponseEntity.badRequest().body(response);
+            // 只要不是系统错误或参数错误导致无法处理，都返回200
+            // 根据业务逻辑，"闹钟已存在"也属于正常处理流程（更新了时间）
+            if (result.contains("异常") || result.contains("错误") || result.contains("不完整") || result.contains("不正确")) {
+                 return ResponseEntity.badRequest().body(result);
             }
+            
+            return ResponseEntity.ok(result);
+            
         } catch (Exception e) {
             log.error("创建闹钟异常", e);
-            response.put("code", 500);
-            response.put("message", "服务器异常: " + e.getMessage());
-            response.put("success", false);
-            return ResponseEntity.internalServerError().body(response);
+            return ResponseEntity.internalServerError().body("服务器异常: " + e.getMessage());
         }
     }
     

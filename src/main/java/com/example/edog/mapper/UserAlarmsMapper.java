@@ -6,8 +6,8 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.edog.entity.UserAlarms;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
-import org.apache.ibatis.annotations.Select;
 
+import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.List;
 
@@ -23,7 +23,6 @@ public interface UserAlarmsMapper extends BaseMapper<UserAlarms> {
      * @param userId 用户ID
      * @return 闹钟列表
      */
-    @Select("SELECT * FROM user_alarms WHERE user_id = #{userId} AND status = 1 ORDER BY alarm_time ASC")
     List<UserAlarms> selectUserAlarmsByUserId(@Param("userId") String userId);
     
     /**
@@ -34,10 +33,24 @@ public interface UserAlarmsMapper extends BaseMapper<UserAlarms> {
      * @param endTime 范围结束时间 (HH:MM:SS)
      * @return 闹钟列表
      */
-    @Select("SELECT * FROM user_alarms WHERE user_id = #{userId} AND status = 1 AND alarm_time >= #{startTime} AND alarm_time <= #{endTime} ORDER BY alarm_time ASC")
     List<UserAlarms> selectAlarmsByTimeRange(
             @Param("userId") String userId,
             @Param("startTime") LocalTime startTime,
             @Param("endTime") LocalTime endTime
+    );
+    /**
+     * 检查重复闹钟
+     *
+     * @param userId 用户ID
+     * @param alarmTime 闹钟时间
+     * @param type 类型
+     * @param targetDate 目标日期（仅单次闹钟有效）
+     * @return 闹钟对象
+     */
+    UserAlarms selectDuplicateAlarm(
+            @Param("userId") String userId,
+            @Param("alarmTime") LocalTime alarmTime,
+            @Param("type") Integer type,
+            @Param("targetDate") LocalDate targetDate
     );
 }

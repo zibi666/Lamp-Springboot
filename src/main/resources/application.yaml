@@ -2,7 +2,7 @@ spring:
   application:
     name: LAMP
   datasource:
-    url: jdbc:mysql://sh-cynosdbmysql-grp-mtd4hmc8.sql.tencentcdb.com:28669/EDOG?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false
+    url: jdbc:mysql://sh-cynosdbmysql-grp-mtd4hmc8.sql.tencentcdb.com:28669/lamp_health?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false
     username: root
     password: Mimawangle2
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -35,6 +35,7 @@ aliyun:
 
 # MyBatis-Plus 配置
 mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
   configuration:
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl  # SQL日志输出
     map-underscore-to-camel-case: true  # 下划线转驼峰

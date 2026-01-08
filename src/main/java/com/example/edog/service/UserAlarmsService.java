@@ -17,9 +17,9 @@ public interface UserAlarmsService extends IService<UserAlarms> {
      * 创建闹钟
      *
      * @param request 创建闹钟请求对象
-     * @return 创建成功返回闹钟ID，失败返回-1
+     * @return 返回操作结果消息（如"创建成功"、"闹钟已存在"等）
      */
-    long createAlarm(AlarmCreateRequest request);
+    String createAlarm(AlarmCreateRequest request);
     
     /**
      * 删除闹钟
