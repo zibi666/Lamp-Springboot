@@ -1,10 +1,13 @@
 spring:
+  profiles:
+    active: dev # 激活 application-dev.yaml
   application:
     name: LAMP
   datasource:
+    # 数据库地址可以保留，但用户名和密码建议使用变量
     url: jdbc:mysql://sh-cynosdbmysql-grp-mtd4hmc8.sql.tencentcdb.com:28669/lamp_health?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false
-    username: root
-    password: Mimawangle2
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:******}
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
       maximum-pool-size: 10
@@ -15,34 +18,30 @@ spring:
 
 server:
   port: 6060
-  # Tomcat WebSocket 缓冲区配置
   tomcat:
     max-http-form-post-size: 10MB
     connection-timeout: 60000
 
-# 扣子智能体配置
 kouzi:
   agent:
     base-url: https://api.coze.cn/v3/chat
-    token: sat_LeDY8iu23Ifcb2UwY7LXfZeL0HhoF4NTswQmlooFVJyRJNd7ExEk9gFogjnRPbPl
+    # Token 留空，通过 dev 文件注入
+    token: ${KOUZI_TOKEN:******}
     bot-id: "7589593616806068233"
 
-# 阿里云占位配置（开发环境可使用占位，请在生产环境使用真实凭证）
 aliyun:
-  appKey: ***
-  accessKeyId: ***
-  accessKeySecret: ***
+  appKey: ${ALIYUN_APP_KEY:******}
+  accessKeyId: ${ALIYUN_AK_ID:******}
+  accessKeySecret: ${ALIYUN_AK_SECRET:******}
 
-# MyBatis-Plus 配置
 mybatis-plus:
   mapper-locations: classpath:mapper/*.xml
   configuration:
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl  # SQL日志输出
-    map-underscore-to-camel-case: true  # 下划线转驼峰
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    map-underscore-to-camel-case: true
   global-config:
     db-config:
-      id-type: auto  # 主键自增
-      logic-delete-field: deleted  # 逻辑删除字段
-      logic-delete-value: 1  # 逻辑已删除值
-      logic-not-delete-value: 0  # 逻辑未删除值
-
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
