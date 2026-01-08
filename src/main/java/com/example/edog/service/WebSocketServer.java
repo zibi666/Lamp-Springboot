@@ -41,9 +41,6 @@ public class WebSocketServer extends AbstractWebSocketHandler {
     private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
     private final Map<String, WebSocketSession> activeSessions = new ConcurrentHashMap<>();
 
-    // 心跳超时检测
-    private static final long HEARTBEAT_TIMEOUT_MS = 30000; // 延长至30秒，适应不稳定网络
-
     // 设备标识映射，用于检测同一设备重连（通过远程地址或设备ID）
     private final Map<String, String> deviceToSessionMap = new ConcurrentHashMap<>();
 
@@ -63,7 +60,11 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         private volatile long lastPongTime;
         private volatile long ttsEndTime;
         private volatile long awakeTime;
+        private volatile long lastAsrResultTime;  // ASR 最后一次返回结果的时间
+        private volatile long audioFrameCount;     // 累计接收的音频帧数
         private volatile List<ScheduledFuture<?>> tasks;
+        // 用于拼接分片消息的缓冲区
+        private final java.io.ByteArrayOutputStream fragmentBuffer = new java.io.ByteArrayOutputStream();
     }
 
     private final Map<String, SessionState> sessionStates = new ConcurrentHashMap<>();
@@ -124,6 +125,8 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         state.lastPongTime = now;
         state.ttsEndTime = 0;
         state.awakeTime = 0;
+        state.lastAsrResultTime = now;  // 初始化为当前时间
+        state.audioFrameCount = 0;
         sessionStates.put(sessionId, state);
     }
 
@@ -137,18 +140,9 @@ public class WebSocketServer extends AbstractWebSocketHandler {
             try {
                 if (session.isOpen()) session.sendMessage(new PingMessage());
             } catch (Exception e) {
-                cleanupSession(sessionId, "心跳发送失败");
+                log.warn("心跳Ping发送失败: session={}, error={}", sessionId, e.getMessage());
             }
-        }, 2, 5, TimeUnit.SECONDS));
-
-        tasks.add(scheduler.scheduleAtFixedRate(() -> {
-            if (!activeSessions.containsKey(sessionId)) return;
-            if (System.currentTimeMillis() - state.lastPongTime > HEARTBEAT_TIMEOUT_MS) {
-                log.warn("心跳超时: session={}", sessionId);
-                cleanupSession(sessionId, "心跳超时");
-                try { session.close(CloseStatus.GOING_AWAY); } catch (Exception ignored) {}
-            }
-        }, 10, 5, TimeUnit.SECONDS));
+        }, 5, 10, TimeUnit.SECONDS)); // 每10秒发送一次Ping，首次延迟5秒
 
         tasks.add(scheduler.scheduleAtFixedRate(() -> {
             if (!session.isOpen() || !activeSessions.containsKey(sessionId)) return;
@@ -166,6 +160,50 @@ public class WebSocketServer extends AbstractWebSocketHandler {
                 log.debug("静音帧发送异常（忽略）: {}", e.getMessage());
             }
         }, 1, 1, TimeUnit.SECONDS));
+
+        // ASR 健康检查任务：检测 ASR 是否静默失效
+        tasks.add(scheduler.scheduleAtFixedRate(() -> {
+            if (!session.isOpen() || !activeSessions.containsKey(sessionId)) return;
+            if (isSessionBusy(sessionId)) return; // 忙碌时不检查
+            
+            AliyunRealtimeASR currentAsr = asrServices.get(sessionId);
+            if (currentAsr == null) return;
+            
+            long now = System.currentTimeMillis();
+            long frameCount = state.audioFrameCount;
+            long lastResultTime = state.lastAsrResultTime;
+            
+            // 检查1：ASR 自身报告不健康（发送失败次数过多）
+            boolean asrUnhealthy = !currentAsr.isHealthy();
+            
+            boolean expectingSpeech = state.awake.get() && (now - state.awakeTime) <= AWAKE_TIMEOUT_MS;
+            boolean noResultsForLong = expectingSpeech && frameCount > 500 && (now - lastResultTime) > 60000;
+            
+            if (asrUnhealthy || noResultsForLong) {
+                if (asrUnhealthy) {
+                    log.warn("ASR 健康检查失败(发送失败): session={}, sendFailCount={}", 
+                            sessionId, currentAsr.getSendFailCount());
+                } else {
+                    log.warn("ASR 健康检查失败(无响应): session={}, frameCount={}, lastResultAge={}ms", 
+                            sessionId, frameCount, now - lastResultTime);
+                }
+                
+                // 重置帧计数，避免重复触发
+                state.audioFrameCount = 0;
+                state.lastAsrResultTime = now;
+                
+                // 异步重置 ASR
+                if (state.resettingAsr.compareAndSet(false, true)) {
+                    CompletableFuture.runAsync(() -> {
+                        try {
+                            resetAsr(session, sessionId, currentAsr);
+                        } finally {
+                            state.resettingAsr.set(false);
+                        }
+                    });
+                }
+            }
+        }, 30, 30, TimeUnit.SECONDS)); // 每30秒检查一次
 
         state.tasks = tasks;
         return tasks;
@@ -206,34 +244,48 @@ public class WebSocketServer extends AbstractWebSocketHandler {
     @Override
     protected void handleBinaryMessage(@NotNull WebSocketSession session, @NotNull BinaryMessage message) {
         String id = session.getId();
-        AliyunRealtimeASR asr = asrServices.get(id);
-
-        if (asr == null || !asr.isRunning()) {
-            ensureAsrReady(session, id);
-            return;
-        }
+        SessionState state = sessionStates.get(id);
+        if (state == null) return;
 
         try {
-            SessionState state = sessionStates.get(id);
-            if (state != null) state.lastAsrSendTime = System.currentTimeMillis();
+            ByteBuffer payload = message.getPayload();
+            byte[] data = new byte[payload.remaining()];
+            payload.get(data);
+
+            // 处理分片消息：将数据追加到缓冲区
+            state.fragmentBuffer.write(data);
+
+            // 如果不是最后一个分片，等待更多数据
+            if (!message.isLast()) {
+                return;
+            }
+
+            // 获取完整消息并清空缓冲区
+            byte[] opusData = state.fragmentBuffer.toByteArray();
+            state.fragmentBuffer.reset();
+
+            if (opusData.length == 0) return;
+
+            state.lastAsrSendTime = System.currentTimeMillis();
+            state.audioFrameCount++;  // 增加音频帧计数
+
+            AliyunRealtimeASR asr = asrServices.get(id);
+            if (asr == null || !asr.isRunning()) {
+                ensureAsrReady(session, id);
+                return;
+            }
 
             if (isSessionBusy(id)) {
                 // 忙碌时只发静音帧维持连接，不识别
                 asr.sendOpusStream(OPUS_SILENCE_FRAME);
             } else {
-                ByteBuffer payload = message.getPayload();
-                byte[] opusData = new byte[payload.remaining()];
-                payload.get(opusData);
-                
-                // 验证数据有效性：检查是否为有效的Opus帧
-                if (opusData.length > 0) {
-                    asr.sendOpusStream(opusData);
-                }
+                asr.sendOpusStream(opusData);
             }
         } catch (Exception e) {
             // 捕获所有异常，避免因为数据处理错误导致连接断开
             log.debug("处理音频数据时出现异常（连接保持）: {}", e.getMessage());
-            // 不再触发resetAsr，让解码器自行恢复
+            // 清空分片缓冲区，避免残留数据影响后续消息
+            state.fragmentBuffer.reset();
         }
     }
 
@@ -273,11 +325,13 @@ public class WebSocketServer extends AbstractWebSocketHandler {
 
     private void updateLightStatus(String brightness, String temperature) {
         try {
-            int temperatureK = Integer.parseInt(temperature);
-            int temperaturePercent = (int) Math.round(temperatureK * 100.0 / MAX_TEMPERATURE_K);
+            int brightnessPercent = Integer.parseInt(brightness);
+            int temperaturePercent = Integer.parseInt(temperature);
+            if (brightnessPercent < 0) brightnessPercent = 0;
+            if (brightnessPercent > 100) brightnessPercent = 100;
             if (temperaturePercent < 0) temperaturePercent = 0;
             if (temperaturePercent > 100) temperaturePercent = 100;
-            latestLt.set("(" + brightness + "," + temperaturePercent + ")");
+            latestLt.set("(" + brightnessPercent + "," + temperaturePercent + ")");
         } catch (NumberFormatException ignored) {}
     }
 
@@ -365,6 +419,10 @@ public class WebSocketServer extends AbstractWebSocketHandler {
 
         SessionState state = sessionStates.get(sessionId);
         if (state == null) return;
+
+        // 更新 ASR 结果时间和重置帧计数（ASR 仍在正常工作）
+        state.lastAsrResultTime = System.currentTimeMillis();
+        state.audioFrameCount = 0;
 
         // 检查是否在TTS播放后的静默期内，防止自说自话
         long elapsed = System.currentTimeMillis() - state.ttsEndTime;
@@ -649,6 +707,16 @@ public class WebSocketServer extends AbstractWebSocketHandler {
             handleAsrText(session, sessionId, text);
         });
 
+        asr.setOnActivityCallback(() -> {
+            if (!activeSessions.containsKey(sessionId)) {
+                return;
+            }
+            SessionState state = sessionStates.get(sessionId);
+            if (state != null) {
+                state.lastAsrResultTime = System.currentTimeMillis();
+            }
+        });
+
         asrServices.put(sessionId, asr);
         try {
             String token = tokenService.getToken();
@@ -676,6 +744,25 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         if (question == null || question.isEmpty()) return null;
 
         int defaultStep = 15; // 默认调整幅度
+
+        if (question.contains("关灯")) {
+            return "(brightness_down,100)";
+        }
+        if (question.contains("开灯")) {
+            return "(brightness_up,50)";
+        }
+        if (question.contains("调低亮度")) {
+            return "(brightness_down,10)";
+        }
+        if (question.contains("调高亮度")) {
+            return "(brightness_up,10)";
+        }
+        if (question.contains("调高色温")) {
+            return "(tem_up,10)";
+        }
+        if (question.contains("调低色温")) {
+            return "(tem_down,10)";
+        }
 
         // 检测音量调高
         if (CMD_VOLUME_UP.matcher(question).find()) {
@@ -710,6 +797,22 @@ public class WebSocketServer extends AbstractWebSocketHandler {
      */
     private String getControlCommandConfirmText(String command) {
         if (command == null) return null;
+
+        if (command.equals("(brightness_down,100)") || command.equals("(brightness_up,50)")) {
+            return "好的";
+        }
+        if (command.equals("(brightness_down,10)")) {
+            return "好的，已将灯光亮度调低10%";
+        }
+        if (command.equals("(brightness_up,10)")) {
+            return "好的，已将灯光亮度调高10%";
+        }
+        if (command.equals("(tem_up,10)")) {
+            return "好的，已将灯光色温调高10%";
+        }
+        if (command.equals("(tem_down,10)")) {
+            return "好的，已将灯光色温调低10%";
+        }
 
         if (command.contains("volume_up")) {
             return "好的，音量已调高";
@@ -795,8 +898,36 @@ public class WebSocketServer extends AbstractWebSocketHandler {
     @Override
     public void afterConnectionClosed(@NotNull WebSocketSession session, @NotNull CloseStatus status) {
         String id = session.getId();
-        log.info("ESP32 Disconnected: id={}, code={}", id, status.getCode());
-        cleanupSession(id, "正常断连");
+        log.info("ESP32 Disconnected: id={}, code={}, reason={}", id, status.getCode(), status.getReason());
+        
+        // 根据关闭码记录更详细的信息
+        switch (status.getCode()) {
+            case 1000:
+                log.info("正常关闭: session={}", id);
+                break;
+            case 1001:
+                log.info("端点离开: session={}", id);
+                break;
+            case 1002:
+                log.warn("协议错误断开: session={}, 可能是帧格式问题或心跳冲突", id);
+                break;
+            case 1003:
+                log.warn("不支持的数据类型: session={}", id);
+                break;
+            case 1006:
+                log.warn("异常关闭（无关闭帧）: session={}, 可能是网络中断", id);
+                break;
+            case 1009:
+                log.warn("消息过大: session={}", id);
+                break;
+            case 1011:
+                log.warn("服务器错误: session={}", id);
+                break;
+            default:
+                log.info("其他关闭码: session={}, code={}", id, status.getCode());
+        }
+        
+        cleanupSession(id, "连接关闭: code=" + status.getCode());
     }
 
     /**
@@ -823,10 +954,16 @@ public class WebSocketServer extends AbstractWebSocketHandler {
             return;
         }
 
-        // 1. 取消所有定时任务
+        // 1. 取消所有定时任务并清理分片缓冲区
         SessionState state = sessionStates.remove(sessionId);
-        if (state != null && state.tasks != null) {
-            state.tasks.forEach(t -> t.cancel(false));
+        if (state != null) {
+            if (state.tasks != null) {
+                state.tasks.forEach(t -> t.cancel(false));
+            }
+            // 清理分片缓冲区
+            try {
+                state.fragmentBuffer.reset();
+            } catch (Exception ignored) {}
         }
 
         // 2. 移除会话相关状态
@@ -859,24 +996,12 @@ public class WebSocketServer extends AbstractWebSocketHandler {
     @Override
     public void handleTransportError(@NotNull WebSocketSession session, @NotNull Throwable exception) {
         String id = session.getId();
-        String errorMsg = exception.getMessage();
-        
-        // 检查是否是可恢复的错误（如解码错误）
-        if (errorMsg != null && (errorMsg.contains("decoding") || errorMsg.contains("corrupted"))) {
-            log.warn("WebSocket 可恢复错误: id={}, error={}", id, errorMsg);
-            // 不清理会话，让连接继续
-            return;
-        }
-        
-        log.error("WebSocket 传输错误: id={}, error={}", id, errorMsg);
-
-        // 只有真正的传输错误才清理会话
-        cleanupSession(id, "传输错误: " + errorMsg);
+        log.warn("WebSocket 传输错误: id={}, error={}", id, exception.getMessage());
     }
 
     @Override
     public boolean supportsPartialMessages() {
-        return false;
+        return true;  // 启用分片消息支持，处理 opCode 0 延续帧
     }
 
     public String getLatestLt() {

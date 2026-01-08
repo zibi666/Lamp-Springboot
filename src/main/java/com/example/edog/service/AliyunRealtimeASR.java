@@ -30,6 +30,7 @@ public class AliyunRealtimeASR {
     private SpeechTranscriber transcriber;
     private OpusDecoder opusDecoder;
     private Consumer<String> textCallback;
+    private Runnable activityCallback;
 
     // 这个标志位现在是核心判断依据，只要它为 true，就说明 start() 中的 CountDownLatch 已经通过，ASR 绝对就绪
     private volatile boolean isRunning = false;
@@ -69,6 +70,34 @@ public class AliyunRealtimeASR {
 
     public void setOnResultCallback(Consumer<String> callback) {
         this.textCallback = callback;
+    }
+
+    public void setOnActivityCallback(Runnable callback) {
+        this.activityCallback = callback;
+    }
+
+    private void notifyActivity() {
+        if (activityCallback == null) return;
+        try {
+            activityCallback.run();
+        } catch (Exception e) {
+            log.debug("activityCallback 异常: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 检查 ASR 是否健康可用
+     * @return true 如果 ASR 正在运行且没有发送失败；false 如果需要重启
+     */
+    public boolean isHealthy() {
+        return isRunning && sendFailCount < MAX_SEND_FAILS;
+    }
+
+    /**
+     * 获取当前发送失败计数
+     */
+    public int getSendFailCount() {
+        return sendFailCount;
     }
 
     public static void shutdownSharedClient() {
@@ -121,7 +150,7 @@ public class AliyunRealtimeASR {
             transcriber.setSampleRate(SampleRateEnum.SAMPLE_RATE_16K);
             transcriber.setEnablePunctuation(true);
             transcriber.addCustomedParam("enable_inverse_text_normalization", true);
-            transcriber.setEnableIntermediateResult(false);
+            transcriber.setEnableIntermediateResult(true);
 
             transcriber.start();
 
@@ -138,6 +167,7 @@ public class AliyunRealtimeASR {
 
             // 只有到了这里，isRunning 才置为 true，此时 sendOpusStream 才可以工作
             isRunning = true;
+            sendFailCount = 0; // 重置发送失败计数
             log.info("ASR 会话启动成功 (Ready to receive audio)");
 
         } catch (Exception e) {
@@ -151,6 +181,10 @@ public class AliyunRealtimeASR {
             throw new RuntimeException("ASR 启动异常", e);
         }
     }
+
+    // 发送失败计数，用于检测 transcriber 静默失效
+    private volatile int sendFailCount = 0;
+    private static final int MAX_SEND_FAILS = 5; // 连续5次发送失败后标记为不可用
 
     public void sendOpusStream(byte[] opusBytes) {
         // 核心修复 3：移除 isClientOpen 反射检查，完全信任 isRunning
@@ -182,7 +216,22 @@ public class AliyunRealtimeASR {
                     pcmData[i * 2] = (byte) (s & 0xff);
                     pcmData[i * 2 + 1] = (byte) ((s >> 8) & 0xff);
                 }
-                transcriber.send(pcmData);
+                
+                // 尝试发送到 ASR
+                try {
+                    transcriber.send(pcmData);
+                    sendFailCount = 0; // 发送成功，重置计数
+                    notifyActivity();
+                } catch (Exception sendEx) {
+                    sendFailCount++;
+                    if (sendFailCount == 1) {
+                        log.warn("ASR 发送失败 (将重试): {}", sendEx.getMessage());
+                    }
+                    if (sendFailCount >= MAX_SEND_FAILS) {
+                        log.error("ASR 发送连续失败{}次，标记为不可用", sendFailCount);
+                        isRunning = false; // 标记为不可用，触发外部重置
+                    }
+                }
             }
         } catch (Exception e) {
             // 解码异常处理：不要让异常导致连接断开
@@ -267,16 +316,27 @@ public class AliyunRealtimeASR {
 
     private SpeechTranscriberListener getListener(CountDownLatch readyLatch, AtomicReference<String> startError) {
         return new SpeechTranscriberListener() {
+            private void markActivity() {
+                if (activityCallback == null) return;
+                try {
+                    activityCallback.run();
+                } catch (Exception e) {
+                    log.debug("activityCallback 异常: {}", e.getMessage());
+                }
+            }
+
             @Override
             public void onTranscriberStart(SpeechTranscriberResponse response) {
                 log.info("任务开始 {}", response.getTaskId());
                 // 收到这个回调，说明连接成功，解锁 start() 方法
                 readyLatch.countDown();
+                markActivity();
             }
 
             @Override
             public void onTranscriptionComplete(SpeechTranscriberResponse response) {
                 log.info("任务结束: {}", response.getStatus());
+                markActivity();
             }
 
             @Override
@@ -286,13 +346,18 @@ public class AliyunRealtimeASR {
                 if (textCallback != null && text != null && !text.isEmpty()) {
                     textCallback.accept(text);
                 }
+                markActivity();
             }
 
             @Override
-            public void onSentenceBegin(SpeechTranscriberResponse response) {}
+            public void onSentenceBegin(SpeechTranscriberResponse response) {
+                markActivity();
+            }
 
             @Override
-            public void onTranscriptionResultChange(SpeechTranscriberResponse response) {}
+            public void onTranscriptionResultChange(SpeechTranscriberResponse response) {
+                markActivity();
+            }
 
             @Override
             public void onFail(SpeechTranscriberResponse response) {
