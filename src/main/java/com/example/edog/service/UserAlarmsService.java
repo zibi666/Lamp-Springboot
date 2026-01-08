@@ -58,4 +58,14 @@ public interface UserAlarmsService extends IService<UserAlarms> {
      * @return 操作成功返回true
      */
     boolean updateAlarmStatus(Long alarmId, String userId, Integer status);
+
+    /**
+     * 更新闹钟状态（state 字段语义与 status 一致，便于前端直接调用）
+     *
+     * @param alarmId 闹钟ID
+     * @param userId 用户ID（用于校验权限）
+     * @param state 状态：1-启用, 0-禁用
+     * @return 操作成功返回true
+     */
+    boolean updateAlarmState(Long alarmId, String userId, Integer state);
 }

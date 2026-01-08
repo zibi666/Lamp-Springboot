@@ -204,6 +204,12 @@ public class UserAlarmsServiceImpl extends ServiceImpl<UserAlarmsMapper, UserAla
             return false;
         }
     }
+
+    @Override
+    public boolean updateAlarmState(Long alarmId, String userId, Integer state) {
+        // 与 updateAlarmStatus 逻辑一致，提供 state 命名以兼容前端字段
+        return updateAlarmStatus(alarmId, userId, state);
+    }
     
     /**
      * 将UserAlarms列表转换为AlarmResponse列表
