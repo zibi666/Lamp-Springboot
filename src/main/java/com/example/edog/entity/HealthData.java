@@ -32,6 +32,11 @@ public class HealthData {
     private Integer breathingRate;
     
     /**
+     * 睡眠状态
+     */
+    private String sleepStatus;
+    
+    /**
      * 上传时间
      */
     private LocalDateTime uploadTime;

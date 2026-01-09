@@ -23,23 +23,23 @@ public class HealthDataController {
     
     /**
      * 上传健康数据接口
-     * 设备每30秒调用一次此接口上传心率和呼吸频率数据
+     * 设备每30秒调用一次此接口上传心率、呼吸频率和睡眠状态数据
      * 
-     * @param request 包含心率和呼吸频率的请求体
+     * @param request 包含心率、呼吸频率和睡眠状态的请求体
      * @return 响应结果
      */
     @PostMapping("/upload")
     public Map<String, Object> uploadHealthData(@RequestBody HealthDataRequest request) {
-        log.info("收到健康数据上传请求: 心率={}, 呼吸频率={}", 
-            request.getHeartRate(), request.getBreathingRate());
+        log.info("收到健康数据上传请求: 心率={}, 呼吸频率={}, 睡眠状态={}", 
+            request.getHeartRate(), request.getBreathingRate(), request.getSleepStatus());
         
         Map<String, Object> response = new HashMap<>();
         
         try {
             // 参数校验
-            if (request.getHeartRate() == null || request.getBreathingRate() == null) {
+            if (request.getHeartRate() == null || request.getBreathingRate() == null || request.getSleepStatus() == null) {
                 response.put("success", false);
-                response.put("message", "心率或呼吸频率不能为空");
+                response.put("message", "心率、呼吸频率或睡眠状态不能为空");
                 return response;
             }
             
@@ -58,7 +58,8 @@ public class HealthDataController {
             // 保存数据
             HealthData savedData = healthDataService.saveHealthData(
                 request.getHeartRate(), 
-                request.getBreathingRate()
+                request.getBreathingRate(),
+                request.getSleepStatus()
             );
             
             response.put("success", true);
@@ -88,5 +89,10 @@ public class HealthDataController {
          * 呼吸频率（次/分钟）
          */
         private Integer breathingRate;
+        
+        /**
+         * 睡眠状态
+         */
+        private String sleepStatus;
     }
 }
