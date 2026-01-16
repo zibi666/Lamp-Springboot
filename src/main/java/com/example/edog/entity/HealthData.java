@@ -37,6 +37,11 @@ public class HealthData {
     private String sleepStatus;
     
     /**
+     * 体动强度指标（0-100）
+     */
+    private Float motionIndex;
+    
+    /**
      * 上传时间
      */
     private LocalDateTime uploadTime;

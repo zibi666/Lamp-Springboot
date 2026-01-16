@@ -21,20 +21,22 @@ public class HealthDataService extends ServiceImpl<HealthDataMapper, HealthData>
      * @param heartRate 心率
      * @param breathingRate 呼吸频率
      * @param sleepStatus 睡眠状态
+     * @param motionIndex 体动强度指标
      * @return 保存的数据
      */
-    public HealthData saveHealthData(Integer heartRate, Integer breathingRate, String sleepStatus) {
+    public HealthData saveHealthData(Integer heartRate, Integer breathingRate, String sleepStatus, Float motionIndex) {
         HealthData healthData = new HealthData();
         healthData.setHeartRate(heartRate);
         healthData.setBreathingRate(breathingRate);
         healthData.setSleepStatus(sleepStatus);
+        healthData.setMotionIndex(motionIndex);
         healthData.setUploadTime(LocalDateTime.now());
         
         boolean success = this.save(healthData);
         
         if (success) {
-            log.info("健康数据保存成功: 心率={}, 呼吸频率={}, 睡眠状态={}, 时间={}", 
-                heartRate, breathingRate, sleepStatus, healthData.getUploadTime());
+            log.info("健康数据保存成功: 心率={}, 呼吸频率={}, 体动={}, 睡眠状态={}, 时间={}", 
+                heartRate, breathingRate, motionIndex, sleepStatus, healthData.getUploadTime());
         } else {
             log.error("健康数据保存失败");
         }
