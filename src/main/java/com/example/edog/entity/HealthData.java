@@ -22,6 +22,11 @@ public class HealthData {
     private Long id;
     
     /**
+     * 用户ID，默认 user123
+     */
+    private String userId;
+    
+    /**
      * 心率（次/分钟）
      */
     private Integer heartRate;

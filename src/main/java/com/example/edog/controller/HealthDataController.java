@@ -30,8 +30,8 @@ public class HealthDataController {
      */
     @PostMapping("/upload")
     public Map<String, Object> uploadHealthData(@RequestBody HealthDataRequest request) {
-        log.info("收到健康数据上传请求: 心率={}, 呼吸频率={}, 体动={}, 睡眠状态={}", 
-            request.getHeartRate(), request.getBreathingRate(), request.getMotionIndex(), request.getSleepStatus());
+        log.info("收到健康数据上传请求: userId={}, 心率={}, 呼吸频率={}, 体动={}, 睡眠状态={}", 
+            request.getUserId(), request.getHeartRate(), request.getBreathingRate(), request.getMotionIndex(), request.getSleepStatus());
         
         Map<String, Object> response = new HashMap<>();
         
@@ -61,12 +61,13 @@ public class HealthDataController {
                 return response;
             }
             
-            // 保存数据
+            // 保存数据（userId 可选，默认 user123）
             HealthData savedData = healthDataService.saveHealthData(
                 request.getHeartRate(), 
                 request.getBreathingRate(),
                 request.getSleepStatus(),
-                request.getMotionIndex()
+                request.getMotionIndex(),
+                request.getUserId()
             );
             
             response.put("success", true);
@@ -87,6 +88,11 @@ public class HealthDataController {
      */
     @lombok.Data
     public static class HealthDataRequest {
+        /**
+         * 用户ID（可选，默认 user123）
+         */
+        private String userId;
+        
         /**
          * 心率（次/分钟）
          */

@@ -190,7 +190,7 @@ public class AliyunTTSService {
             synthesizer.setFormat(OutputFormatEnum.PCM);
             synthesizer.setSampleRate(SampleRateEnum.SAMPLE_RATE_24K);
             synthesizer.setVoice("zhixiaoxia"); // 默认发音人
-            synthesizer.setVolume(50);
+            synthesizer.setVolume(80);
             synthesizer.setSpeechRate(0);
             synthesizer.setPitchRate(0);
 
