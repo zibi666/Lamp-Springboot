@@ -92,8 +92,9 @@ public class SleepSummaryService extends ServiceImpl<SleepSummaryMapper, SleepSu
         return SleepSummaryResponse.builder()
                 .queryDate(queryDate)
                 .sampleCount(0)
+                .lightSleepDurationMin(0.0)
+                .deepSleepDurationMin(0.0)
                 .remDurationMin(0.0)
-                .nremDurationMin(0.0)
                 .totalSleepMin(0.0)
                 .avgHeartRate(0.0)
                 .avgBreathingRate(0.0)
@@ -111,8 +112,9 @@ public class SleepSummaryService extends ServiceImpl<SleepSummaryMapper, SleepSu
                 .sleepTime(summary.getSleepTime())
                 .wakeTime(summary.getWakeTime())
                 .sampleCount(summary.getSampleCount() != null ? summary.getSampleCount() : 0)
+                .lightSleepDurationMin(summary.getLightSleepDurationMin() != null ? summary.getLightSleepDurationMin() : 0.0)
+                .deepSleepDurationMin(summary.getDeepSleepDurationMin() != null ? summary.getDeepSleepDurationMin() : 0.0)
                 .remDurationMin(summary.getRemDurationMin() != null ? summary.getRemDurationMin() : 0.0)
-                .nremDurationMin(summary.getNremDurationMin() != null ? summary.getNremDurationMin() : 0.0)
                 .totalSleepMin(summary.getTotalSleepMin() != null ? summary.getTotalSleepMin() : 0.0)
                 .avgHeartRate(summary.getAvgHeartRate())
                 .avgBreathingRate(summary.getAvgBreathingRate())
@@ -152,44 +154,34 @@ public class SleepSummaryService extends ServiceImpl<SleepSummaryMapper, SleepSu
     public List<SleepSummaryResponse> getSleepSummariesByDateRange(String userId, LocalDate startDate, LocalDate endDate) {
         log.info("查询睡眠汇总列表: userId={}, startDate={}, endDate={}", userId, startDate, endDate);
         
-        // 从 sleep_summary 表查询指定日期范围内的数据
-        LambdaQueryWrapper<SleepSummary> queryWrapper = new LambdaQueryWrapper<>();
-        queryWrapper.eq(SleepSummary::getUserId, userId)
-                    .ge(SleepSummary::getQueryDate, startDate)
-                    .le(SleepSummary::getQueryDate, endDate)
-                    .orderByAsc(SleepSummary::getQueryDate);
-        
-        List<SleepSummary> summaries = this.list(queryWrapper);
-        
-        if (summaries == null || summaries.isEmpty()) {
-            log.info("未找到睡眠汇总数据: userId={}, startDate={}, endDate={}", userId, startDate, endDate);
-            return new ArrayList<>();
-        }
-        
-        // 转换为响应对象列表
         List<SleepSummaryResponse> responses = new ArrayList<>();
-        for (SleepSummary summary : summaries) {
-            List<LocalDateTime> wakeStartTimes = parseWakeStartTimes(summary.getWakeStartTimes());
-            
-            SleepSummaryResponse response = SleepSummaryResponse.builder()
-                    .queryDate(summary.getQueryDate())
-                    .sleepTime(summary.getSleepTime())
-                    .wakeTime(summary.getWakeTime())
-                    .sampleCount(summary.getSampleCount() != null ? summary.getSampleCount() : 0)
-                    .remDurationMin(summary.getRemDurationMin() != null ? summary.getRemDurationMin() : 0.0)
-                    .nremDurationMin(summary.getNremDurationMin() != null ? summary.getNremDurationMin() : 0.0)
-                    .totalSleepMin(summary.getTotalSleepMin() != null ? summary.getTotalSleepMin() : 0.0)
-                    .avgHeartRate(summary.getAvgHeartRate())
-                    .avgBreathingRate(summary.getAvgBreathingRate())
-                    .wakeCount(summary.getWakeCount() != null ? summary.getWakeCount() : 0)
-                    .wakeStartTimes(wakeStartTimes)
-                    .message(summary.getMessage())
-                    .build();
-            
-            responses.add(response);
+        
+        // 遍历每一天
+        LocalDate currentDate = startDate;
+        while (!currentDate.isAfter(endDate)) {
+            try {
+                // 调用单日查询方法（包含自动生成逻辑）
+                // 如果生成失败，getSleepSummaryByDateAndUser 会返回包含错误信息的 Response
+                // 我们通过检查 sampleCount > 0 来判断是否为有效报告
+                SleepSummaryResponse response = getSleepSummaryByDateAndUser(currentDate, userId);
+                
+                if (response.getSampleCount() != null && response.getSampleCount() > 0) {
+                    responses.add(response);
+                } else {
+                    log.debug("日期 {} 无有效睡眠报告，跳过", currentDate);
+                }
+            } catch (Exception e) {
+                log.error("处理日期 {} 失败", currentDate, e);
+            }
+            currentDate = currentDate.plusDays(1);
         }
         
-        log.info("查询睡眠汇总列表成功: userId={}, 共 {} 条记录", userId, responses.size());
+        if (responses.isEmpty()) {
+            log.info("未找到睡眠汇总数据: userId={}, startDate={}, endDate={}", userId, startDate, endDate);
+        } else {
+            log.info("查询睡眠汇总列表成功: userId={}, 共 {} 条记录", userId, responses.size());
+        }
+        
         return responses;
     }
 }

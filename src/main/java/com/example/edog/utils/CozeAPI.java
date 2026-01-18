@@ -23,9 +23,46 @@ public class CozeAPI {
     private static final String BOT_ID = "7589593616806068233";
 
     /**
+     * 创建 Coze 会话
+     */
+    public String createConversation() {
+        try {
+            RestTemplate restTemplate = createUtf8RestTemplate();
+            String url = "https://api.coze.cn/v1/conversation/create";
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(COZE_API_TOKEN);
+
+            Map<String, Object> requestBody = new HashMap<>();
+            requestBody.put("bot_id", BOT_ID);
+
+            HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBody, headers);
+
+            ResponseEntity<String> response = restTemplate.exchange(
+                    url, HttpMethod.POST, requestEntity, String.class);
+
+            if (response.getStatusCode() == HttpStatus.OK && response.getBody() != null) {
+                ObjectMapper mapper = new ObjectMapper();
+                JsonNode root = mapper.readTree(response.getBody());
+                // 解析返回的 data.id
+                if (root.has("data") && root.get("data").has("id")) {
+                    String conversationId = root.get("data").get("id").asText();
+                    System.out.println("[CozeAPI] 会话创建成功: " + conversationId);
+                    return conversationId;
+                }
+            }
+            System.err.println("[CozeAPI] 会话创建失败: " + response.getBody());
+        } catch (Exception e) {
+            System.err.println("[CozeAPI] 会话创建异常: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
      * 调用 Coze 接口
      */
-    public String[] CozeRequest(String question, String voiceId, Double speedRatio, boolean stream) {
+    public String[] CozeRequest(String question, String voiceId, Double speedRatio, boolean stream, String conversationId) {
         
         try {
             RestTemplate restTemplate = createUtf8RestTemplate();
@@ -54,6 +91,10 @@ public class CozeAPI {
             requestBody.put("stream", stream);
             requestBody.put("auto_save_history", true);
             requestBody.put("additional_messages", additionalMessages);
+            
+            if (conversationId != null && !conversationId.isEmpty()) {
+                requestBody.put("conversation_id", conversationId);
+            }
 
             // 序列化整个请求体
             String finalRequestBodyJson = mapper.writeValueAsString(requestBody);

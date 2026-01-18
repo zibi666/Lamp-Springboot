@@ -73,6 +73,7 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         private volatile String voiceId;
         private volatile Double speedRatio;
         private volatile int volume;
+        private volatile String conversationId; // Coze 会话ID
         
         public SessionState(String defaultVoiceId, Double defaultSpeed, int defaultVolume) {
             this.voiceId = defaultVoiceId;
@@ -225,6 +226,15 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         deviceToSessionMap.put(deviceKey, id);
         registerSession(session, id);
 
+        // 异步创建 Coze 会话
+        workerExecutor.submit(() -> {
+            String convId = cozeAPI.createConversation();
+            if (convId != null) {
+                SessionState state = sessionStates.get(id);
+                if (state != null) state.conversationId = convId;
+            }
+        });
+
         try {
             AliyunRealtimeASR asr = startAsrForSession(session, id);
             if (asr != null) {
@@ -367,7 +377,7 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         String cleanPinyin = pinyin.replaceAll("[^a-z]", "");
 
         if (WakeWordUtils.isWakeWord(cleanPinyin)) {
-            log.info("触发唤醒词: 小爱同学 (pinyin: {})", cleanPinyin);
+            log.info("触发唤醒词: 小灵 (pinyin: {})", cleanPinyin);
             handleWakeUp(session, sessionId);
             return;
         }
@@ -498,9 +508,10 @@ public class WebSocketServer extends AbstractWebSocketHandler {
         // 使用会话独立的语音配置
         String shouldUseVoiceId = state != null ? state.voiceId : defaultVoiceId;
         Double shouldUseSpeed = state != null ? state.speedRatio : defaultSpeedRatio;
+        String conversationId = state != null ? state.conversationId : null;
 
-        log.info("请求智能体: '{}' (Voice: {}, Speed: {})", question, shouldUseVoiceId, shouldUseSpeed);
-        String[] response = cozeAPI.CozeRequest(question, shouldUseVoiceId, shouldUseSpeed, true);
+        log.info("请求智能体: '{}' (Voice: {}, Speed: {}, ConvId: {})", question, shouldUseVoiceId, shouldUseSpeed, conversationId);
+        String[] response = cozeAPI.CozeRequest(question, shouldUseVoiceId, shouldUseSpeed, true, conversationId);
 
         if (response != null && response.length >= 2) {
             String replyText = response[1];

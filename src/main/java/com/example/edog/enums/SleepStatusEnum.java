@@ -9,17 +9,22 @@ public enum SleepStatusEnum {
     /**
      * 清醒状态
      */
-    WAKE("Wake"),
+    WAKE("WAKE"),
     
     /**
-     * 快速眼动睡眠（浅睡眠，有梦境）
+     * 快速眼动睡眠（有梦境）
      */
     REM("REM"),
     
     /**
-     * 非快速眼动睡眠（深睡眠）
+     * 深度睡眠
      */
-    NREM("NREM");
+    DEEP("DEEP"),
+    
+    /**
+     * 浅度睡眠
+     */
+    LIGHT("LIGHT");
     
     private final String value;
     
@@ -49,13 +54,33 @@ public enum SleepStatusEnum {
     }
     
     /**
-     * 判断是否为睡眠状态（REM 或 NREM）
+     * 判断是否为睡眠状态（REM、DEEP 或 LIGHT）
      * @param value 状态字符串
      * @return 是否为睡眠状态
      */
     public static boolean isSleeping(String value) {
         SleepStatusEnum status = fromValue(value);
-        return status == REM || status == NREM;
+        return status == REM || status == DEEP || status == LIGHT;
+    }
+    
+    /**
+     * 判断是否为深度睡眠状态
+     * @param value 状态字符串
+     * @return 是否为深度睡眠状态
+     */
+    public static boolean isDeepSleep(String value) {
+        SleepStatusEnum status = fromValue(value);
+        return status == DEEP;
+    }
+    
+    /**
+     * 判断是否为浅度睡眠状态
+     * @param value 状态字符串
+     * @return 是否为浅度睡眠状态
+     */
+    public static boolean isLightSleep(String value) {
+        SleepStatusEnum status = fromValue(value);
+        return status == LIGHT;
     }
     
     /**

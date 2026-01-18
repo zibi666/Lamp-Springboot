@@ -48,17 +48,22 @@ public class SleepSummary {
     private Integer sampleCount;
     
     /**
+     * 浅度睡眠时长（分钟）
+     */
+    private Double lightSleepDurationMin;
+    
+    /**
+     * 深度睡眠时长（分钟）
+     */
+    private Double deepSleepDurationMin;
+    
+    /**
      * REM睡眠时长（分钟）
      */
     private Double remDurationMin;
     
     /**
-     * NREM睡眠时长（分钟）
-     */
-    private Double nremDurationMin;
-    
-    /**
-     * 总睡眠时长（分钟）= REM + NREM
+     * 总睡眠时长（分钟）= REM + 浅度睡眠 + 深度睡眠
      */
     private Double totalSleepMin;
     

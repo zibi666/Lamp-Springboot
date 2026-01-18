@@ -143,7 +143,8 @@ public class SleepController {
             response.put("queryDate", queryDate.toString());
             response.put("totalSleepMin", summary.getTotalSleepMin());
             response.put("remDurationMin", summary.getRemDurationMin());
-            response.put("nremDurationMin", summary.getNremDurationMin());
+            response.put("lightSleepDurationMin", summary.getLightSleepDurationMin());
+            response.put("deepSleepDurationMin", summary.getDeepSleepDurationMin());
             response.put("wakeCount", summary.getWakeCount());
             
             return ResponseEntity.ok(response);

@@ -50,19 +50,25 @@ public class SleepSummaryResponse {
     private Integer sampleCount;
     
     /**
+     * 浅度睡眠时长（分钟）
+     */
+    @JsonProperty("light_sleep_duration_min")
+    private Double lightSleepDurationMin;
+    
+    /**
+     * 深度睡眠时长（分钟）
+     */
+    @JsonProperty("deep_sleep_duration_min")
+    private Double deepSleepDurationMin;
+    
+    /**
      * REM时长（分钟）
      */
     @JsonProperty("rem_duration_min")
     private Double remDurationMin;
     
     /**
-     * NREM时长（分钟）
-     */
-    @JsonProperty("nrem_duration_min")
-    private Double nremDurationMin;
-    
-    /**
-     * 总睡眠时长（分钟）= REM + NREM
+     * 总睡眠时长（分钟）= REM + 浅度睡眠 + 深度睡眠
      */
     @JsonProperty("total_sleep_min")
     private Double totalSleepMin;

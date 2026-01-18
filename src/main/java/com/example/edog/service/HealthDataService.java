@@ -104,8 +104,9 @@ public class HealthDataService extends ServiceImpl<HealthDataMapper, HealthData>
             return SleepSummaryResponse.builder()
                     .queryDate(queryDate)
                     .sampleCount(0)
+                    .lightSleepDurationMin(0.0)
+                    .deepSleepDurationMin(0.0)
                     .remDurationMin(0.0)
-                    .nremDurationMin(0.0)
                     .totalSleepMin(0.0)
                     .avgHeartRate(0.0)
                     .avgBreathingRate(0.0)
@@ -118,7 +119,8 @@ public class HealthDataService extends ServiceImpl<HealthDataMapper, HealthData>
         // 3. 统计各项指标
         int sampleCount = dataList.size();
         int remCount = 0;
-        int nremCount = 0;
+        int deepCount = 0;   // 深度睡眠计数（DEEP状态）
+        int lightCount = 0;  // 浅度睡眠计数（LIGHT状态）
         long heartRateSum = 0;
         long breathingRateSum = 0;
         int validHeartRateCount = 0;
@@ -155,11 +157,13 @@ public class HealthDataService extends ServiceImpl<HealthDataMapper, HealthData>
             String currentStatus = data.getSleepStatus();
             Float currentMotion = data.getMotionIndex();
             
-            // 3.1 统计 REM/NREM 记录数
+            // 3.1 统计 REM/DEEP/LIGHT 记录数
             if (SleepStatusEnum.REM.getValue().equalsIgnoreCase(currentStatus)) {
                 remCount++;
-            } else if (SleepStatusEnum.NREM.getValue().equalsIgnoreCase(currentStatus)) {
-                nremCount++;
+            } else if (SleepStatusEnum.DEEP.getValue().equalsIgnoreCase(currentStatus)) {
+                deepCount++;
+            } else if (SleepStatusEnum.LIGHT.getValue().equalsIgnoreCase(currentStatus)) {
+                lightCount++;
             }
             
             // 3.2 累加心率和呼吸频率（用于计算平均值）
@@ -231,8 +235,9 @@ public class HealthDataService extends ServiceImpl<HealthDataMapper, HealthData>
         
         // 4. 计算时长和平均值
         double remDurationMin = remCount * SAMPLE_INTERVAL_MIN;
-        double nremDurationMin = nremCount * SAMPLE_INTERVAL_MIN;
-        double totalSleepMin = remDurationMin + nremDurationMin;
+        double deepSleepDurationMin = deepCount * SAMPLE_INTERVAL_MIN;
+        double lightSleepDurationMin = lightCount * SAMPLE_INTERVAL_MIN;
+        double totalSleepMin = remDurationMin + deepSleepDurationMin + lightSleepDurationMin;
         
         // 平均心率和呼吸频率（单位：次/半分钟，与设备上报一致）
         double avgHeartRate = validHeartRateCount > 0 ? 
@@ -246,8 +251,9 @@ public class HealthDataService extends ServiceImpl<HealthDataMapper, HealthData>
                 .sleepTime(sleepTime)
                 .wakeTime(wakeTime)
                 .sampleCount(sampleCount)
+                .lightSleepDurationMin(round2(lightSleepDurationMin))
+                .deepSleepDurationMin(round2(deepSleepDurationMin))
                 .remDurationMin(round2(remDurationMin))
-                .nremDurationMin(round2(nremDurationMin))
                 .totalSleepMin(round2(totalSleepMin))
                 .avgHeartRate(round2(avgHeartRate))
                 .avgBreathingRate(round2(avgBreathingRate))
@@ -256,8 +262,8 @@ public class HealthDataService extends ServiceImpl<HealthDataMapper, HealthData>
                 .message(null)
                 .build();
         
-        log.info("睡眠汇总统计完成: sampleCount={}, remMin={}, nremMin={}, totalMin={}, wakeCount={}", 
-                sampleCount, remDurationMin, nremDurationMin, totalSleepMin, wakeCount);
+        log.info("睡眠汇总统计完成: sampleCount={}, remMin={}, deepMin={}, lightMin={}, totalMin={}, wakeCount={}", 
+                sampleCount, remDurationMin, deepSleepDurationMin, lightSleepDurationMin, totalSleepMin, wakeCount);
         
         return response;
     }

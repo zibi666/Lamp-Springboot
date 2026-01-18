@@ -163,8 +163,8 @@ public class SleepReportGeneratorService {
             // 即使验证失败，也需要清理数据，避免残留无效数据
             LambdaQueryWrapper<HealthData> deleteWrapper = new LambdaQueryWrapper<>();
             deleteWrapper.eq(HealthData::getUserId, userId)
-                         .ge(HealthData::getUploadTime, windowStart)
-                         .lt(HealthData::getUploadTime, windowEnd);
+                        .ge(HealthData::getUploadTime, windowStart)
+                        .lt(HealthData::getUploadTime, windowEnd);
             int deletedCount = healthDataMapper.delete(deleteWrapper);
             log.info("用户 {} 睡眠数据不完整（{}），已清理 {} 条相关数据", userId, cycleValidation, deletedCount);
             
@@ -216,22 +216,26 @@ public class SleepReportGeneratorService {
     
     /**
      * 验证数据是否包含完整的睡眠周期
-     * 完整周期定义：WAKE -> NREM -> REM -> WAKE
+     * 完整周期定义：WAKE -> 非REM睡眠(LIGHT/DEEP/NREM) -> REM -> WAKE
      * 
      * @param dataList 健康数据列表
      * @return 如果验证失败返回错误信息，成功返回null
      */
     private String validateCompleteSleepCycle(List<HealthData> dataList) {
         // 状态机：跟踪睡眠周期进度
-        // 0: 初始/等待WAKE, 1: 已有WAKE等待NREM, 2: 已有NREM等待REM, 3: 已有REM等待WAKE, 4: 完整周期
+        // 0: 初始/等待WAKE, 1: 已有WAKE等待非REM睡眠, 2: 已有非REM睡眠等待REM, 3: 已有REM等待WAKE, 4: 完整周期
         int cycleState = 0;
         boolean hasWake = false;
-        boolean hasNrem = false;
+        boolean hasNonRemSleep = false;  // 包括 LIGHT/DEEP/NREM
         boolean hasRem = false;
         
         for (HealthData data : dataList) {
             String status = data.getSleepStatus();
             if (status == null) continue;
+            
+            // 判断是否为非REM睡眠状态（LIGHT/DEEP）
+            boolean isNonRemSleep = SleepStatusEnum.LIGHT.getValue().equalsIgnoreCase(status) 
+                    || SleepStatusEnum.DEEP.getValue().equalsIgnoreCase(status);
             
             switch (cycleState) {
                 case 0: // 等待初始WAKE
@@ -241,19 +245,19 @@ public class SleepReportGeneratorService {
                     }
                     break;
                     
-                case 1: // 已有WAKE，等待NREM
-                    if (SleepStatusEnum.NREM.getValue().equalsIgnoreCase(status)) {
+                case 1: // 已有WAKE，等待非REM睡眠
+                    if (isNonRemSleep) {
                         cycleState = 2;
-                        hasNrem = true;
+                        hasNonRemSleep = true;
                     }
                     break;
                     
-                case 2: // 已有NREM，等待REM
+                case 2: // 已有非REM睡眠，等待REM
                     if (SleepStatusEnum.REM.getValue().equalsIgnoreCase(status)) {
                         cycleState = 3;
                         hasRem = true;
                     } else if (SleepStatusEnum.isWake(status)) {
-                        // 还没进入REM就醒了，重新开始等待NREM
+                        // 还没进入REM就醒了，重新开始等待非REM睡眠
                         cycleState = 1;
                     }
                     break;
@@ -261,9 +265,9 @@ public class SleepReportGeneratorService {
                 case 3: // 已有REM，等待最终WAKE
                     if (SleepStatusEnum.isWake(status)) {
                         cycleState = 4; // 完整周期！
-                        log.debug("检测到完整睡眠周期: WAKE -> NREM -> REM -> WAKE");
-                    } else if (SleepStatusEnum.NREM.getValue().equalsIgnoreCase(status)) {
-                        // REM后又进入NREM，继续等待REM
+                        log.debug("检测到完整睡眠周期: WAKE -> 非REM睡眠 -> REM -> WAKE");
+                    } else if (isNonRemSleep) {
+                        // REM后又进入非REM睡眠，继续等待REM
                         cycleState = 2;
                     }
                     break;
@@ -280,11 +284,11 @@ public class SleepReportGeneratorService {
         // 检查是否有完整周期
         if (cycleState < 4) {
             StringBuilder sb = new StringBuilder("睡眠数据不完整，缺少完整的睡眠周期。");
-            sb.append("需要完整的 WAKE→NREM→REM→WAKE 周期。");
+            sb.append("需要完整的 WAKE→非REM睡眠(LIGHT/DEEP)→REM→WAKE 周期。");
             sb.append("当前数据：");
             if (!hasWake) sb.append("缺少清醒(WAKE)状态；");
-            if (!hasNrem) sb.append("缺少浅睡眠(NREM)状态；");
-            if (!hasRem) sb.append("缺少深睡眠(REM)状态；");
+            if (!hasNonRemSleep) sb.append("缺少非REM睡眠(LIGHT/DEEP)状态；");
+            if (!hasRem) sb.append("缺少REM睡眠状态；");
             if (cycleState == 3) sb.append("睡眠周期未完成（最终未检测到清醒）；");
             
             return sb.toString();
@@ -332,6 +336,13 @@ public class SleepReportGeneratorService {
         String cycleValidation = validateCompleteSleepCycle(dataList);
         if (cycleValidation != null) {
             log.info("用户 {} 睡眠数据不完整: {}", userId, cycleValidation);
+            // 即使验证失败，也需要清理数据，避免残留无效数据
+            LambdaQueryWrapper<HealthData> deleteWrapper = new LambdaQueryWrapper<>();
+            deleteWrapper.eq(HealthData::getUserId, userId)
+                         .ge(HealthData::getUploadTime, windowStart)
+                         .lt(HealthData::getUploadTime, windowEnd);
+            int deletedCount = healthDataMapper.delete(deleteWrapper);
+            log.info("用户 {} 睡眠数据不完整（{}），已清理 {} 条相关数据", userId, cycleValidation, deletedCount);
             return false;
         }
         
@@ -353,6 +364,12 @@ public class SleepReportGeneratorService {
         // 8. 检查睡眠时长
         if (summary.getTotalSleepMin() < 30) {
             log.info("用户 {} 睡眠时间过短（{}分钟），跳过生成", userId, summary.getTotalSleepMin());
+            // 同样需要清理数据
+            LambdaQueryWrapper<HealthData> deleteWrapper = new LambdaQueryWrapper<>();
+            deleteWrapper.eq(HealthData::getUserId, userId)
+                         .ge(HealthData::getUploadTime, windowStart)
+                         .lt(HealthData::getUploadTime, windowEnd);
+            healthDataMapper.delete(deleteWrapper);
             return false;
         }
         
@@ -497,7 +514,8 @@ public class SleepReportGeneratorService {
     private SleepSummary generateSleepSummary(String userId, LocalDate queryDate, List<HealthData> dataList) {
         int sampleCount = dataList.size();
         int remCount = 0;
-        int nremCount = 0;
+        int deepCount = 0;   // 深度睡眠计数（DEEP状态）
+        int lightCount = 0;  // 浅度睡眠计数（LIGHT状态）
         long heartRateSum = 0;
         long breathingRateSum = 0;
         int validHeartRateCount = 0;
@@ -532,11 +550,13 @@ public class SleepReportGeneratorService {
             String currentStatus = data.getSleepStatus();
             Float currentMotion = data.getMotionIndex();
             
-            // 统计 REM/NREM 记录数
+            // 统计 REM/DEEP/LIGHT 记录数
             if (SleepStatusEnum.REM.getValue().equalsIgnoreCase(currentStatus)) {
                 remCount++;
-            } else if (SleepStatusEnum.NREM.getValue().equalsIgnoreCase(currentStatus)) {
-                nremCount++;
+            } else if (SleepStatusEnum.DEEP.getValue().equalsIgnoreCase(currentStatus)) {
+                deepCount++;
+            } else if (SleepStatusEnum.LIGHT.getValue().equalsIgnoreCase(currentStatus)) {
+                lightCount++;
             }
             
             // 累加心率和呼吸频率
@@ -598,8 +618,9 @@ public class SleepReportGeneratorService {
         
         // 计算时长和平均值
         double remDurationMin = remCount * SAMPLE_INTERVAL_MIN;
-        double nremDurationMin = nremCount * SAMPLE_INTERVAL_MIN;
-        double totalSleepMin = remDurationMin + nremDurationMin;
+        double deepSleepDurationMin = deepCount * SAMPLE_INTERVAL_MIN;
+        double lightSleepDurationMin = lightCount * SAMPLE_INTERVAL_MIN;
+        double totalSleepMin = remDurationMin + deepSleepDurationMin + lightSleepDurationMin;
         
         double avgHeartRate = validHeartRateCount > 0 ? 
                 (double) heartRateSum / validHeartRateCount : 0.0;
@@ -613,8 +634,9 @@ public class SleepReportGeneratorService {
         summary.setSleepTime(sleepTime);
         summary.setWakeTime(wakeTime);
         summary.setSampleCount(sampleCount);
+        summary.setLightSleepDurationMin(round2(lightSleepDurationMin));
+        summary.setDeepSleepDurationMin(round2(deepSleepDurationMin));
         summary.setRemDurationMin(round2(remDurationMin));
-        summary.setNremDurationMin(round2(nremDurationMin));
         summary.setTotalSleepMin(round2(totalSleepMin));
         summary.setAvgHeartRate(round2(avgHeartRate));
         summary.setAvgBreathingRate(round2(avgBreathingRate));

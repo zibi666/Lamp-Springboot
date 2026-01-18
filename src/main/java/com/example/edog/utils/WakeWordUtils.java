@@ -8,44 +8,39 @@ public class WakeWordUtils {
 
     private static final Logger log = LoggerFactory.getLogger(WakeWordUtils.class);
 
-    private static final String WAKE_WORD_PINYIN = "xiaoaitongxue";
+    private static final String WAKE_WORD_PINYIN = "xiaoling";
     private static final double WAKE_WORD_SIMILARITY_THRESHOLD = 0.75;
 
     /**
      * 检测是否为唤醒词
-     * 支持完全匹配、包含匹配和相似度匹配
+     * 1. 支持标准包含匹配
+     * 2. 支持前后鼻音模糊匹配 (如 xiaolin 匹配 xiaoling)
      */
     public static boolean isWakeWord(String cleanPinyin) {
         if (cleanPinyin == null || cleanPinyin.isEmpty()) return false;
 
-        // 1. 完全包含唤醒词拼音
+        // 1. 标准包含匹配
         if (cleanPinyin.contains(WAKE_WORD_PINYIN)) {
             return true;
         }
 
-        // 2. 相似度匹配（处理语音识别不准确的情况）
-        // 检查是否与唤醒词相似（如"小爱童鞋"、"小艾同学"等）
-        double similarity = calculatePinyinSimilarity(cleanPinyin, WAKE_WORD_PINYIN);
-        if (similarity >= WAKE_WORD_SIMILARITY_THRESHOLD) {
-            log.debug("唤醒词相似度匹配: {} vs {}, similarity={}", cleanPinyin, WAKE_WORD_PINYIN, similarity);
-            return true;
-        }
+        // 2. 前后鼻音模糊匹配
+        // 将输入和唤醒词都统一转换为前鼻音进行比较
+        String inputNormalized = normalizeNasalSounds(cleanPinyin);
+        String wakeWordNormalized = normalizeNasalSounds(WAKE_WORD_PINYIN);
 
-        // 3. 检查是否包含相似的子串（处理前后有其他字的情况）
-        if (cleanPinyin.length() > WAKE_WORD_PINYIN.length()) {
-            // 滑动窗口检查
-            int windowSize = WAKE_WORD_PINYIN.length();
-            for (int i = 0; i <= cleanPinyin.length() - windowSize; i++) {
-                String sub = cleanPinyin.substring(i, i + windowSize);
-                double subSimilarity = calculatePinyinSimilarity(sub, WAKE_WORD_PINYIN);
-                if (subSimilarity >= WAKE_WORD_SIMILARITY_THRESHOLD) {
-                    log.debug("唤醒词子串相似度匹配: {} vs {}, similarity={}", sub, WAKE_WORD_PINYIN, subSimilarity);
-                    return true;
-                }
-            }
-        }
+        return inputNormalized.contains(wakeWordNormalized);
+    }
 
-        return false;
+    /**
+     * 归一化前后鼻音
+     * 将后鼻音 (ang, eng, ing) 统一转换为前鼻音 (an, en, in)
+     */
+    private static String normalizeNasalSounds(String pinyin) {
+        if (pinyin == null) return "";
+        return pinyin.replaceAll("ang", "an")
+                     .replaceAll("eng", "en")
+                     .replaceAll("ing", "in");
     }
 
     /**
