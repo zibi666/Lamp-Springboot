@@ -129,7 +129,6 @@ public class SleepReportGeneratorService {
     
     /**
      * 尝试为指定用户生成睡眠报告（供查询时自动调用）
-     * 生成报告后删除已使用的原始健康数据，只保留睡眠汇总数据
      * 
      * @param userId 用户ID
      * @param queryDate 查询日期
@@ -160,14 +159,7 @@ public class SleepReportGeneratorService {
         // 2. 验证是否包含完整的睡眠周期 (WAKE -> NREM -> REM -> WAKE)
         String cycleValidation = validateCompleteSleepCycle(dataList);
         if (cycleValidation != null) {
-            // 即使验证失败，也需要清理数据，避免残留无效数据
-            LambdaQueryWrapper<HealthData> deleteWrapper = new LambdaQueryWrapper<>();
-            deleteWrapper.eq(HealthData::getUserId, userId)
-                        .ge(HealthData::getUploadTime, windowStart)
-                        .lt(HealthData::getUploadTime, windowEnd);
-            int deletedCount = healthDataMapper.delete(deleteWrapper);
-            log.info("用户 {} 睡眠数据不完整（{}），已清理 {} 条相关数据", userId, cycleValidation, deletedCount);
-            
+            log.info("用户 {} 睡眠数据不完整（{}）", userId, cycleValidation);
             return GenerateResult.fail(cycleValidation);
         }
         
@@ -176,14 +168,7 @@ public class SleepReportGeneratorService {
         
         // 4. 检查睡眠时长是否过短（至少30分钟）
         if (summary.getTotalSleepMin() < 30) {
-            // 同样需要清理数据
-            LambdaQueryWrapper<HealthData> deleteWrapper = new LambdaQueryWrapper<>();
-            deleteWrapper.eq(HealthData::getUserId, userId)
-                         .ge(HealthData::getUploadTime, windowStart)
-                         .lt(HealthData::getUploadTime, windowEnd);
-            healthDataMapper.delete(deleteWrapper);
-            
-            return GenerateResult.fail("睡眠时间过短（少于30分钟），无法生成有效报告，已清理数据");
+            return GenerateResult.fail("睡眠时间过短（少于30分钟），无法生成有效报告");
         }
         
         // 5. 保存到数据库
@@ -198,15 +183,6 @@ public class SleepReportGeneratorService {
         } else {
             sleepSummaryMapper.insert(summary);
         }
-        
-        // 6. 删除已使用的健康数据，只保留睡眠汇总数据
-        LambdaQueryWrapper<HealthData> deleteWrapper = new LambdaQueryWrapper<>();
-        deleteWrapper.eq(HealthData::getUserId, userId)
-                     .ge(HealthData::getUploadTime, windowStart)
-                     .lt(HealthData::getUploadTime, windowEnd);
-        int deletedCount = healthDataMapper.delete(deleteWrapper);
-        log.info("已删除用户 {} 的 {} 条原始健康数据（时间范围: {} 至 {}）", 
-                userId, deletedCount, windowStart, windowEnd);
         
         log.info("为用户 {} 生成睡眠报告成功: queryDate={}, totalSleepMin={}", 
                 userId, queryDate, summary.getTotalSleepMin());
@@ -336,13 +312,6 @@ public class SleepReportGeneratorService {
         String cycleValidation = validateCompleteSleepCycle(dataList);
         if (cycleValidation != null) {
             log.info("用户 {} 睡眠数据不完整: {}", userId, cycleValidation);
-            // 即使验证失败，也需要清理数据，避免残留无效数据
-            LambdaQueryWrapper<HealthData> deleteWrapper = new LambdaQueryWrapper<>();
-            deleteWrapper.eq(HealthData::getUserId, userId)
-                         .ge(HealthData::getUploadTime, windowStart)
-                         .lt(HealthData::getUploadTime, windowEnd);
-            int deletedCount = healthDataMapper.delete(deleteWrapper);
-            log.info("用户 {} 睡眠数据不完整（{}），已清理 {} 条相关数据", userId, cycleValidation, deletedCount);
             return false;
         }
         
@@ -364,12 +333,6 @@ public class SleepReportGeneratorService {
         // 8. 检查睡眠时长
         if (summary.getTotalSleepMin() < 30) {
             log.info("用户 {} 睡眠时间过短（{}分钟），跳过生成", userId, summary.getTotalSleepMin());
-            // 同样需要清理数据
-            LambdaQueryWrapper<HealthData> deleteWrapper = new LambdaQueryWrapper<>();
-            deleteWrapper.eq(HealthData::getUserId, userId)
-                         .ge(HealthData::getUploadTime, windowStart)
-                         .lt(HealthData::getUploadTime, windowEnd);
-            healthDataMapper.delete(deleteWrapper);
             return false;
         }
         
@@ -377,14 +340,6 @@ public class SleepReportGeneratorService {
         sleepSummaryMapper.insert(summary);
         log.info("用户 {} 的睡眠报告已保存: queryDate={}, totalSleepMin={}", 
                 userId, queryDate, summary.getTotalSleepMin());
-        
-        // 10. 删除已使用的 health_data 数据
-        LambdaQueryWrapper<HealthData> deleteWrapper = new LambdaQueryWrapper<>();
-        deleteWrapper.eq(HealthData::getUserId, userId)
-                     .ge(HealthData::getUploadTime, windowStart)
-                     .lt(HealthData::getUploadTime, windowEnd);
-        int deletedCount = healthDataMapper.delete(deleteWrapper);
-        log.info("已删除用户 {} 的 {} 条健康数据", userId, deletedCount);
         
         return true;
     }
@@ -437,14 +392,6 @@ public class SleepReportGeneratorService {
             sleepSummaryMapper.insert(summary);
             log.info("创建用户 {} 的 {} 睡眠报告", userId, queryDate);
         }
-        
-        // 删除已使用的数据
-        LambdaQueryWrapper<HealthData> deleteWrapper = new LambdaQueryWrapper<>();
-        deleteWrapper.eq(HealthData::getUserId, userId)
-                     .ge(HealthData::getUploadTime, windowStart)
-                     .lt(HealthData::getUploadTime, windowEnd);
-        int deletedCount = healthDataMapper.delete(deleteWrapper);
-        log.info("已删除用户 {} 的 {} 条健康数据", userId, deletedCount);
         
         return summary;
     }
