@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.edog.mapper.UserMapper">
+
+    <select id="selectByPhone" resultType="com.example.edog.entity.User">
+        SELECT *
+        FROM users
+        WHERE phone = #{phone}
+        LIMIT 1
+    </select>
+
+    <select id="selectByUserId" resultType="com.example.edog.entity.User">
+        SELECT *
+        FROM users
+        WHERE user_id = #{userId}
+        LIMIT 1
+    </select>
+
+    <select id="countByUserId" resultType="java.lang.Integer">
+        SELECT COUNT(1)
+        FROM users
+        WHERE user_id = #{userId}
+    </select>
+
+    <select id="selectMaxNumericUserId" resultType="java.lang.Integer">
+        SELECT MAX(CAST(user_id AS UNSIGNED))
+        FROM users
+        WHERE user_id REGEXP '^[0-9]{6}$'
+    </select>
+
+</mapper>

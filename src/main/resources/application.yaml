@@ -25,14 +25,15 @@ server:
 kouzi:
   agent:
     base-url: https://api.coze.cn/v3/chat
-    # Token 留空，通过 dev 文件注入
-    token: ${KOUZI_TOKEN:******}
+    # Token 仅在 application-dev.yaml 中配置
+    token: ${KOUZI_TOKEN:}
     bot-id: "7589593616806068233"
 
 aliyun:
-  appKey: ${ALIYUN_APP_KEY:******}
-  accessKeyId: ${ALIYUN_AK_ID:******}
-  accessKeySecret: ${ALIYUN_AK_SECRET:******}
+  # 密钥仅在 application-dev.yaml 中配置
+  appKey: ${ALIYUN_APP_KEY:}
+  accessKeyId: ${ALIYUN_AK_ID:}
+  accessKeySecret: ${ALIYUN_AK_SECRET:}
 
 mybatis-plus:
   mapper-locations: classpath:mapper/*.xml
@@ -45,3 +46,23 @@ mybatis-plus:
       logic-delete-field: deleted
       logic-delete-value: 1
       logic-not-delete-value: 0
+
+cos:
+  # bucket 需包含 appid 后缀，例如：examplebucket-1250000000
+  bucket: lamp-1360220156
+  region: ap-nanjing
+
+  # 固定密钥签名，不使用 STS 临时凭证
+  use-temp-credential: false
+
+  # 上传限制
+  policy-expire-seconds: ${COS_POLICY_EXPIRE_SECONDS:300}
+  max-file-size-bytes: ${COS_MAX_FILE_SIZE_BYTES:2097152}
+
+  # 鉴权校验（无统一鉴权时可先关闭）
+  require-login: ${COS_REQUIRE_LOGIN:false}
+  login-user-header: ${COS_LOGIN_USER_HEADER:X-User-Id}
+
+  # 可选：自定义上传域名 / 访问域名，不填使用默认 COS 域名
+  upload-host: ${COS_UPLOAD_HOST:}
+  public-host: ${COS_PUBLIC_HOST:}

@@ -2,9 +2,11 @@ package com.example.edog.utils;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.http.converter.StringHttpMessageConverter;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestTemplate;
 
 import java.io.*;
@@ -18,24 +20,29 @@ import java.util.*;
 @Component
 public class CozeAPI {
 
-    // 请确保 Token 和 BotID 正确
-    private static final String COZE_API_TOKEN = "sat_LeDY8iu23Ifcb2UwY7LXfZeL0HhoF4NTswQmlooFVJyRJNd7ExEk9gFogjnRPbPl";
-    private static final String BOT_ID = "7589593616806068233";
+    @Value("${kouzi.agent.token:}")
+    private String cozeApiToken;
+
+    @Value("${kouzi.agent.bot-id:}")
+    private String botId;
 
     /**
      * 创建 Coze 会话
      */
     public String createConversation() {
         try {
+            String token = requireConfig(cozeApiToken, "kouzi.agent.token 未配置");
+            String configuredBotId = requireConfig(botId, "kouzi.agent.bot-id 未配置");
+
             RestTemplate restTemplate = createUtf8RestTemplate();
             String url = "https://api.coze.cn/v1/conversation/create";
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(COZE_API_TOKEN);
+            headers.setBearerAuth(token);
 
             Map<String, Object> requestBody = new HashMap<>();
-            requestBody.put("bot_id", BOT_ID);
+            requestBody.put("bot_id", configuredBotId);
 
             HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBody, headers);
 
@@ -63,14 +70,24 @@ public class CozeAPI {
      * 调用 Coze 接口
      */
     public String[] CozeRequest(String question, String voiceId, Double speedRatio, boolean stream, String conversationId) {
+        return CozeRequest(question, "user_123", voiceId, speedRatio, stream, conversationId);
+    }
+
+    /**
+     * 调用 Coze 接口（可指定用户ID）
+     */
+    public String[] CozeRequest(String question, String userId, String voiceId, Double speedRatio, boolean stream, String conversationId) {
         
         try {
+            String token = requireConfig(cozeApiToken, "kouzi.agent.token 未配置");
+            String configuredBotId = requireConfig(botId, "kouzi.agent.bot-id 未配置");
+
             RestTemplate restTemplate = createUtf8RestTemplate();
             String url = "https://api.coze.cn/v3/chat";
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(COZE_API_TOKEN);
+            headers.setBearerAuth(token);
 
             ObjectMapper mapper = new ObjectMapper();
 
@@ -86,8 +103,9 @@ public class CozeAPI {
 
             // 2. 构造请求体
             Map<String, Object> requestBody = new HashMap<>();
-            requestBody.put("bot_id", BOT_ID);
-            requestBody.put("user_id", "user_123");
+            requestBody.put("bot_id", configuredBotId);
+            String normalizedUserId = (userId == null || userId.trim().isEmpty()) ? "user_123" : userId.trim();
+            requestBody.put("user_id", normalizedUserId);
             requestBody.put("stream", stream);
             requestBody.put("auto_save_history", true);
             requestBody.put("additional_messages", additionalMessages);
@@ -280,5 +298,12 @@ public class CozeAPI {
     
     public byte[] downloadAudioBytes(String audioUrl) {
         return null; 
+    }
+
+    private String requireConfig(String value, String message) {
+        if (!StringUtils.hasText(value)) {
+            throw new IllegalStateException(message);
+        }
+        return value.trim();
     }
 }

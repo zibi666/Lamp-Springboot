@@ -84,7 +84,8 @@ public class WebSocketServer extends AbstractWebSocketHandler {
 
     private final Map<String, SessionState> sessionStates = new ConcurrentHashMap<>();
 
-    private final CozeAPI cozeAPI = new CozeAPI();
+    @Autowired
+    private CozeAPI cozeAPI;
 
     // 默认语音配置（用于新连接的会话）
     private volatile String defaultVoiceId = "7568423452617523254";

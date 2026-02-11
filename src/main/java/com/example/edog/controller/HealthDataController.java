@@ -4,8 +4,11 @@ import com.example.edog.entity.HealthData;
 import com.example.edog.service.HealthDataService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -81,6 +84,61 @@ public class HealthDataController {
         }
         
         return response;
+    }
+
+    /**
+     * 获取指定用户在指定日期最新一条健康数据
+     *
+     * @param date 查询日期（YYYY-MM-DD）
+     * @param userId 用户ID（可选，默认 user123）
+     * @return 最新健康数据（当日无数据时 data 为 null）
+     */
+    @GetMapping("/latest")
+    public ResponseEntity<Map<String, Object>> getLatestHealthData(
+            @RequestParam("date") String date,
+            @RequestParam(value = "userId", required = false, defaultValue = "user123") String userId) {
+        Map<String, Object> response = new HashMap<>();
+        String normalizedUserId = (userId != null && !userId.trim().isEmpty()) ? userId.trim() : "user123";
+
+        LocalDate queryDate;
+        try {
+            queryDate = LocalDate.parse(date);
+        } catch (DateTimeParseException e) {
+            response.put("success", false);
+            response.put("message", "日期格式错误，请使用 YYYY-MM-DD 格式");
+            return ResponseEntity.badRequest().body(response);
+        }
+
+        try {
+            HealthData latestData = healthDataService.getLatestHealthDataByDateAndUser(queryDate, normalizedUserId);
+            response.put("success", true);
+            response.put("query_date", queryDate.toString());
+            response.put("user_id", normalizedUserId);
+
+            if (latestData == null) {
+                response.put("message", "该日期暂无健康数据");
+                response.put("data", null);
+                return ResponseEntity.ok(response);
+            }
+
+            Map<String, Object> data = new HashMap<>();
+            data.put("id", latestData.getId());
+            data.put("user_id", latestData.getUserId());
+            data.put("heart_rate", latestData.getHeartRate());
+            data.put("breathing_rate", latestData.getBreathingRate());
+            data.put("sleep_status", latestData.getSleepStatus());
+            data.put("motion_index", latestData.getMotionIndex());
+            data.put("upload_time", latestData.getUploadTime());
+
+            response.put("message", "查询成功");
+            response.put("data", data);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("查询最新健康数据失败: date={}, userId={}", date, normalizedUserId, e);
+            response.put("success", false);
+            response.put("message", "查询失败: " + e.getMessage());
+            return ResponseEntity.internalServerError().body(response);
+        }
     }
     
     /**

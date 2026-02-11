@@ -36,6 +36,18 @@ public class HealthDataService extends ServiceImpl<HealthDataMapper, HealthData>
      */
     @Value("${sleep.motion-threshold:30}")
     private float motionThreshold;
+
+    /**
+     * 睡眠窗口起始小时（默认18点，即下午6点）
+     */
+    @Value("${sleep.window-start-hour:18}")
+    private int windowStartHour;
+
+    /**
+     * 睡眠窗口结束小时（默认12点，即中午12点）
+     */
+    @Value("${sleep.window-end-hour:12}")
+    private int windowEndHour;
     
     /**
      * 默认用户ID
@@ -77,6 +89,67 @@ public class HealthDataService extends ServiceImpl<HealthDataMapper, HealthData>
      */
     public HealthData saveHealthData(Integer heartRate, Integer breathingRate, String sleepStatus, Float motionIndex) {
         return saveHealthData(heartRate, breathingRate, sleepStatus, motionIndex, DEFAULT_USER_ID);
+    }
+
+    /**
+     * 查询指定用户在指定日期内最新的一条健康数据
+     *
+     * @param queryDate 查询日期
+     * @param userId 用户ID（为空时使用默认用户）
+     * @return 最新健康数据；若当天无数据则返回 null
+     */
+    public HealthData getLatestHealthDataByDateAndUser(LocalDate queryDate, String userId) {
+        String normalizedUserId = (userId != null && !userId.trim().isEmpty()) ? userId.trim() : DEFAULT_USER_ID;
+        LocalDateTime dayStart = queryDate.atStartOfDay();
+        LocalDateTime dayEnd = queryDate.plusDays(1).atStartOfDay();
+
+        LambdaQueryWrapper<HealthData> queryWrapper = new LambdaQueryWrapper<>();
+        queryWrapper.eq(HealthData::getUserId, normalizedUserId)
+                .ge(HealthData::getUploadTime, dayStart)
+                .lt(HealthData::getUploadTime, dayEnd)
+                .orderByDesc(HealthData::getUploadTime)
+                .orderByDesc(HealthData::getId)
+                .last("LIMIT 1");
+
+        List<HealthData> results = this.list(queryWrapper);
+        if (results == null || results.isEmpty()) {
+            return null;
+        }
+        return results.get(0);
+    }
+
+    /**
+     * 获取指定查询日期对应的睡眠窗口开始时间
+     * 窗口定义：queryDate 18:00 ~ queryDate+1 12:00
+     */
+    public LocalDateTime getSleepWindowStart(LocalDate queryDate) {
+        return queryDate.atTime(windowStartHour, 0, 0);
+    }
+
+    /**
+     * 获取指定查询日期对应的睡眠窗口结束时间
+     * 窗口定义：queryDate 18:00 ~ queryDate+1 12:00
+     */
+    public LocalDateTime getSleepWindowEnd(LocalDate queryDate) {
+        return queryDate.plusDays(1).atTime(windowEndHour, 0, 0);
+    }
+
+    /**
+     * 查询指定用户在睡眠窗口内的所有详细健康数据（按时间升序）
+     */
+    public List<HealthData> getSleepWindowDataByDateAndUser(LocalDate queryDate, String userId) {
+        String normalizedUserId = (userId != null && !userId.trim().isEmpty()) ? userId.trim() : DEFAULT_USER_ID;
+        LocalDateTime windowStart = getSleepWindowStart(queryDate);
+        LocalDateTime windowEnd = getSleepWindowEnd(queryDate);
+
+        LambdaQueryWrapper<HealthData> queryWrapper = new LambdaQueryWrapper<>();
+        queryWrapper.eq(HealthData::getUserId, normalizedUserId)
+                .ge(HealthData::getUploadTime, windowStart)
+                .lt(HealthData::getUploadTime, windowEnd)
+                .orderByAsc(HealthData::getUploadTime)
+                .orderByAsc(HealthData::getId);
+
+        return this.list(queryWrapper);
     }
     
     /**
